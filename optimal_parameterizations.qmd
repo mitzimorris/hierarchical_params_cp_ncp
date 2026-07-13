@@ -21,8 +21,8 @@ format:
     toc-location: right
     embed-resources: true
     html-math-method: mathjax
+bibliography: references.bib
 reference-location: margin
-citation-location: margin
 include-in-header:
   - text: |
       <style>
@@ -38,8 +38,7 @@ This case study revisits the question of how to parameterize a hierarchical mode
 in order to improve the computational performance of an MCMC sampler.
 This is discussed in the [Stan User's Guide](https://mc-stan.org/docs/stan-users-guide/) chapter "Efficiency Tuning",
 section [reparameterization](https://mc-stan.org/docs/stan-users-guide/efficiency-tuning.html#funnel.figure),
-and at greater length in [Betancourt and Girolami, 2013](https://arxiv.org/abs/1312.0906)
-and [Papaspiliopoulos et al, 2007](https://arxiv.org/abs/0708.3797).
+and at greater length in @Betancourt-Girolami:2013 and @papa-et-al:2007.
 This case study expands on that example and provides further examples of reparameterizations.
 
 ## Hierarchical models and HMC samplers
@@ -49,7 +48,7 @@ over a $N$-dimensional parameter space.
 Markov chain Monte Carlo algorithms generate samples from this joint posterior
 and the sampler efficiency depends on the geometric properties of this joint posterior distribution.
 
-Here we show Figure 1 from Betancourt and Girolami which shows the structure of a simple hierarchical model
+Here we show Figure 1 from @Betancourt-Girolami:2013 which shows the structure of a simple hierarchical model
 where each data item consists of both an observed value and a membership id for the group it belongs to.
 Following their terminology,
 there is a single population-level parameter $\phi$ and $\mathrm{N}$ local parameters ${\theta}_1, ... {\theta}_{\mathrm{N}}$,
@@ -129,22 +128,25 @@ Conversely, a challenging posterior density is one which
 has curvature that changes rapidly across the region
 of substantial posterior probability or differs greatly across directions.
 
-The canonical example of a challenging posterior density is [Neal's funnel](https://mc-stan.org/docs/stan-users-guide/efficiency-tuning.html#funnel.figure)
-@Neal:2003 defines a distribution that exemplifies the difficulties of
-sampling from some hierarchical models.
-Neal's example has support for $y \in \mathbb{R}$ and $x \in \mathbb{R}^9$ with density
-
+The canonical example of a challenging posterior density is [Neal's funnel](https://mc-stan.org/docs/stan-users-guide/efficiency-tuning.html#funnel.figure), after @Neal:2003.
+Section 8 of this article defines a distribution that exemplifies the difficulties of sampling from some hierarchical models
+which has support for $y \in \mathbb{R}$ and $x \in \mathbb{R}^9$ with density
 $$
 p(y,x) = \textsf{normal}(y \mid 0,3) \times \prod_{n=1}^9
 \textsf{normal}(x_n \mid 0,\exp(y/2)).
 $$
 
+::: {.column-margin}
+![Neal's funnel](img/funnel.png)
+:::
+
+At left we show the plot on the log scale of $x[1], y$ .
 The probability contours are shaped like ten-dimensional funnels.  The
 funnel's neck is particularly sharp because of the exponential
 function applied to $y$.
 
-Following Betancourt and Girolami,  $y$ is the global parameter $\phi$,
-and $x$ is local parameter $\theta$ and can be implemented directly in Stan as follows.
+Following Betancourt and Girolami,  $y$ is the global parameter $\phi$, and $x$ is local parameter $\theta$.
+Given these names, this distribution can be coded in Stan as follows.
 
 ```stan
 parameters {
@@ -159,43 +161,31 @@ model {
 
 
 
-
-The Stan User's Guide presents Neal's funnel:
-- show plot
-Rename variables to make it clear what the parameters are.
-
-Show the two parameterizations.
-
 (mention Stan's [affine-transform](https://mc-stan.org/docs/reference-manual/types.html#affine-transform.section) 
 The same model can be [reparameterized](SUG reparameterization discussion).
 
+The first parameterization is known as the *centered parameterization* and the second is the *non-centered parameterization* (cite Papa et al).
 
-## To Center or to Non-Center
+These plots show the posterior geometry of the distribution; these are essentially plots of the *prior* distribution, without respect to the likelihood,
+the distribution of the prior conditioned on the data.
+Different data regimes produce different posterior geometries; some posterior geometries are more difficult for the sampler to explore.
+The Stan User's Guide and key Stan case studies (which have been translated into other PPL frameworks),
+provide small example datasets for which the non-centered parameterization is more efficient.
+However this is not always the case.
 
-The Stan User's Guide and key Stan case studies (which have been translated into other PPL frameworks), provide small example datasets for which the non-centered parameterization is more efficient.
-However, this is not always the case.   To illustrate, we write the data-generating model corresponding to hierarchical structure of the Neal's funnel model and generate several datasets of increasing size.
+To illustrate, we write the data-generating model corresponding to hierarchical structure of the Neal's funnel model and generate several datasets of increasing size.
 Then we fit these datasets using both the centered and non-centered parameterizations and compare the resulting samples.
 
 
 
-```stan
-// ncp
-```
-
-The first parameterization is known as the *centered parameterization* and the second is the *non-centered parameterization* (cite Papa et al).
-
 For a well-specified model, these alternative parameterizations should produce exactly the same posterior estimates for all parameters.
 The difference is the amount of computation required for the MCMC sampler, either Gibbs or NUTS-HMC, to achieve satisfactory R-hat and ESS for those parameters and this difference is due to the nature of the data the model is trying to fit.
-Different data regimes produce different posterior geometries; some posterior geometries are more difficult for the sampler to explore.
 
 This is due the sampler algorithm.  When a hierarchical model seems to be making slow progress and the resulting diagnostics are less than satisfactory - poor ESS, many iterations at maximum tree-depth -
 changing from a centered to non-centered parameterization, or vice-verse, may be in order.
 
-This case study expands on discussions in the [Stan User's Guide](https://mc-stan.org/docs/stan-users-guide/) 
 
-## Hierarchical Models:  hierarhcical and group-level variance.
 
-## MCMC Samplers: navigating high-dimensional posterior geometries.
 
 ## Reparameterizing a single hierarchical regression coefficient
 
@@ -210,3 +200,7 @@ This case study expands on discussions in the [Stan User's Guide](https://mc-sta
 
 
 
+### References
+
+::: {#refs}
+:::
