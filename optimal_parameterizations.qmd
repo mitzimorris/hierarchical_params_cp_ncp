@@ -30,166 +30,463 @@ include-in-header:
           width: auto;
         }
       </style>
+execute:
+  engine: jupyter
 ---
+
+*Load libraries and set up notebook.*
+```{python}
+# libraries used in this notebook
+#| output: false
+#| echo: false
+import os
+import numpy as np
+import pandas as pd
+import plotnine as p9
+from cmdstanpy import CmdStanModel, CmdStanMCMC
+
+def plot_divergences(
+    fit: CmdStanMCMC,
+    x_var: str,
+    y_var: str,
+    title: str | None = None,
+    subtitle: str | None = None,
+) -> p9.ggplot:
+    """Scatterplot of two parameters from a fit, divergent transitions in red.
+
+    Non-divergent draws are plotted in dark grey at alpha 0.5, divergent draws
+    are overplotted in red. Variable names are cmdstanpy column labels, using
+    Stan's 1-based indexing, e.g. 'x[1]' or 'theta[1]'.
+    """
+    draws: pd.DataFrame = fit.draws_pd()
+    plot_data = pd.DataFrame(
+        {
+            "x": draws[x_var].to_numpy(),
+            "y": draws[y_var].to_numpy(),
+            "divergent": draws["divergent__"].to_numpy() > 0,
+        }
+    )
+    kept = plot_data[~plot_data["divergent"]]
+    diverged = plot_data[plot_data["divergent"]]
+    return (
+        p9.ggplot(plot_data, p9.aes(x="x", y="y"))
+        + p9.geom_point(data=kept, color="#333333", alpha=0.5, size=1.0)
+        + p9.geom_point(data=diverged, color="red", alpha=0.8, size=1.0)
+        + p9.labs(
+            x=x_var,
+            y=y_var,
+            title=title if title is not None else f"{y_var} vs {x_var}",
+            subtitle=subtitle
+        )
+        + p9.theme_minimal()
+    )
+
+p9.options.figure_size = (6, 6)
+p9.options.dpi = 100
+```
 
 ## Overview
 
 This case study revisits the question of how to parameterize a hierarchical model
-in order to improve the computational performance of an MCMC sampler.
+in order to improve the computational performance of an Markov chain Monte Carlo (MCMC) sampler,
+in particular, the No-U-Turn Sampler for Hamiltonian Monte Carlo (NUTS-HMC) sampler used in Stan.
 This is discussed in the [Stan User's Guide](https://mc-stan.org/docs/stan-users-guide/) chapter "Efficiency Tuning",
 section [reparameterization](https://mc-stan.org/docs/stan-users-guide/efficiency-tuning.html#funnel.figure),
 and at greater length in @Betancourt-Girolami:2013 and @papa-et-al:2007.
 This case study expands on that example and provides further examples of reparameterizations.
 
-## Hierarchical models and HMC samplers
+## Hierarchical models and MCMC samplers
 
-A Bayesian model with $N$ parameters defines a joint posterior probability density
-over a $N$-dimensional parameter space.
-Markov chain Monte Carlo algorithms generate samples from this joint posterior
-and the sampler efficiency depends on the geometric properties of this joint posterior distribution.
-
-Here we show Figure 1 from @Betancourt-Girolami:2013 which shows the structure of a simple hierarchical model
+A Bayesian model with $N$ parameters defines a probability density over a $N$-dimensional parameter space.
+There are many names for hierarhcical models and their components.
+Here we follow the terminology of @Betancourt-Girolami:2013.
+At the left is Figure 1 from that paper which shows the structure of a simple hierarchical model
 where each data item consists of both an observed value and a membership id for the group it belongs to.
-Following their terminology,
-there is a single population-level parameter $\phi$ and $\mathrm{N}$ local parameters ${\theta}_1, ... {\theta}_{\mathrm{N}}$,
+This example consists of a single population-level parameter $\phi$ and $\mathrm{N}$ local parameters ${\theta}_1, ... {\theta}_{\mathrm{N}}$,
 The local parameters draw common information from the global parameter,
 thus allowing for partial pooling of information across groups.
-The interactions among these parameters determine the geometry of the posterior and
-therefore the difficulty of sampling from it.
    
 ::: {.column-margin}
 ![Hierarchical model structure](img/betancourt_girolami_fig1.png)
 :::
 
+MCMC algorithms generate samples from the posterior distribution
+and the sampler efficiency depends on the geometric properties of this distribution.
+The posterior distribution is the conditional distribution of the parameters given the data.
+Thus, the interaction of the parameters and the data
+determine the geometry of the posterior,
+and they do so according to Bayes's theorem:
 
-### What is an "easy" posterior geometry?
+\begin{align}
+\underbrace{p(\textrm{params} \mid \textrm{data})}_{\textrm{posterior}}
+&\propto
+\underbrace{p(\textrm{data} \mid \textrm{params})}_{\textrm{sampling}}
+\cdot
+\underbrace{p(\textrm{params})}_{\textrm{prior}}
+\\[4pt]
+\end{align}
 
-HMC explores a posterior distribution using information about its local geometry.
-Three related quantities are useful for understanding how the algorithm behaves.
+In the absence of data, the posterior distribution is the prior distribution.
+When analyzing $n$ data points, the prior comes in once
+and the sampling distribution enters the posterior $n$ times.
+Thus both the data and the amount of data determine how
+the geometry of the posterior density evolves from the prior.
 
-**Posterior density.** The posterior density describes the relative
-plausibility of points in parameter space.
-Stan works with the log posterior density $\log p(\theta \mid y)$.
+### Stan's NUTS-HMC algorithm
 
-**Gradient.** The gradient gives the direction and rate of the steepest
-increase in the log posterior density.
+A general understanding of the HMC algorithm is needed in order to
+understand why the parameterization of hierarchical models is challenging for HMC.
+The algorithm works with three related quantities.
+
+* *Posterior density*: the probability per unit volume near a point (because any given point has zero probability).
+Stan works with the unnormalized log posterior density $\log p(\theta \mid y) + const$.
+
+* *Gradient*: the vector of first derivatives of the log posterior density.
+It provides the direction and rate of the steepest increase in the log density.
 HMC uses this local information to simulate trajectories through parameter space.
-The [Hamiltonian equation](https://mc-stan.org/docs/reference-manual/mcmc.html#the-hamiltonian)
-is defined in terms of the negative log posterior density $-\log p(\theta \mid y)$.
 
-**Hessian.** The Hessian is the matrix of second derivatives of the
-negative log posterior density. It describes local curvature: how the
-gradient changes as the parameters change.
+* *Hessian*: the matrix of second derivatives of the negative log posterior density.
+It describes local curvature: how the gradient changes as the parameters change.
 
-The NUTS-HMC algorithm uses three 
-[algorithm parameters](https://mc-stan.org/docs/reference-manual/mcmc.html#hmc-algorithm-parameters)
-in order to sample from the posterior density by simulating the Hamiltonian trajectory of a particle:
+HMC generates draws from the posterior distribution using the posterior density function and its gradient.
+Gradients of the target log density function allow HMC to follow the
+Hamiltonian flow in order to efficiently generate long-distance
+proposals with high acceptance rates.
+
+There are three [algorithm parameters](https://mc-stan.org/docs/reference-manual/mcmc.html#hmc-algorithm-parameters)
+used to follow the Hamiltonian.
 
 * discretization time $\epsilon$ (step size)
-* the Euclidean metric $M$ (mass matrix) - a single global approximation to the local curvature.
+* the Euclidean metric $M$ (mass matrix)
+* $L$ - the number of steps taken to follow the Hamiltonian trajectory to arrive at a draw from the posterior.
+Every step requires computing gradient of the posterior density at that point; this is computationally expensive.
 
-The step size and mass matrix are estimated during warmup (adaptation) and fixed during sampling.
-The NUTS-HMC algorithm determines the length of the trajectory dynamically,
-however it is bounded by $2^{\mathrm{max\_treedepth}} - 1$.
-The HMC algorithm uses the [leapfrog integrator](https://mc-stan.org/docs/reference-manual/mcmc.html#leapfrog-integrator)
-to trace an HMC trajectory using alternating discrete position and momentum updates,
-(the term "leapfrog" describes this alternation).
-Sampling efficiency, both in terms of iteration speed and
-iterations per effective sample, is highly sensitive to these three
-tuning parameters.
+HMC simulates the (discretized) Hamiltonian trajectory of a particle which,
+given a refresh of random momentum at each iteraction,
+traces a path through the parameter space.
+The mass matrix is used to provide this momentum.
+The [Stan Reference Manual MCMC chapter](https://mc-stan.org/docs/reference-manual/mcmc.html) 
+provides the details.
 
-- If the step size is too large, the leapfrog integrator becomes inaccurate.
-If the step size is too small, each trajectory requires many leapfrog steps, increasing computation time per iteration.
-
-
-- If the inverse metric $M^{-1}$ is a poor estimate of the posterior covariance,
-the step size $\epsilon$ must be kept small to maintain arithmetic
-precision. This would lead to a large max_treedepth to compensate; again resulting in slow progress.
-
-In all but very simple models (such as multivariate normals), the Hessian will vary as $\theta$ varies.
-The more the curvature varies, the harder it is for all of the
-algorithms with fixed adaptation parameters to find adaptations that
-cover the entire density well.
-Large differences in curvature constrain the integrator's step size,
-while rapidly changing curvature makes a single global adaptation less effective.
-
-Thus we have answered the question: what is an easy posterior geometry?
-A multivariate normal.
-What is a particularly easy posterior geometry?  An isotropic Gaussian.
-This is a special case of the multivariate normal:
+:::{.callout-note appearance="minimal" icon=false style="border-left-color: #d3d3d3;"}
+HMC introduces auxiliary momentum variables $\rho$ and draws from a
+joint density
 
 $$
-\theta \sim \mathcal N(\mu,\sigma^2 I)
+p(\rho, \theta) = p(\rho  \mid  \theta) p(\theta).
 $$
 
-Its variance is identical in every direction, so its equal-density contours are spheres.
+In most applications of HMC, including Stan, the auxiliary density is
+a multivariate normal that does not depend on the parameters $\theta$,
 
+$$
+\rho \sim \mathsf{MultiNormal}(0, M),
+$$
+
+where $M$ is a positive definite mass matrix.  The mass matrix
+functions as a metric and is equivalent to having a linear
+preconditioner; see @Betancourt:2017 for details.
+
+Stan estimates a mass matrix during warmup using the covariance of the
+warmup draws.  The mass matrix will be set to the inverse of the
+covariance estimate of the warmup draws, or to the inverse of the
+diagonal of the covariance estimate of the draws.
+:::
+
+The well-tuned HMC sampler requires that:
+
+- the number of steps $L$ is sufficiently long in order to efficiently explore the posterior, but not too long so as to waste work.
+- the step-size small enough to produce trajectories that obey Hamiltonian dynamics but no smaller.
+- the mass matrix is a good linear pre-conditioner.
+
+During warmup (adaptation) Stan's NUTS-HMC sampler estimates the step size and mass matrix given the model and the data.
+The number of steps $L$ is determined dynamically for each iteration according to the "No-U-Turn" algorithm
+introduced in @Hoffman-Gelman:2014 and refined in @Betancourt:2017.
+
+If the posterior is (approximately) multivarite normal (Gaussian)
+then the mass matrix is a linear map that transforms it
+it into an isotropic Gaussian which is the easiest geometry for HMC.
+The transformed target is a perfectly round bowl:
+every direction has the same curvature, and a *single step size is accurate everywhere*.
+During warmup the step size is adjusted in tandem with mass matrix estimation.
+The optimal step size is small enough to accurately follow the Hamiltonian flow
+and no smaller since the smaller the step size, the more steps are needed to complete the trajectory
+and the greater the computational cost.
+
+When the when the posterior curvature (i.e., the Hessian) varies through the target density
+is impossible to find a mass matrix which works as a global preconditioner.
+The sampler struggles to do so during warmup, and in so doing, sets the step size smaller and smaller.
+Given a poor approximation to the mass matrix, the random momentum refresh leads to trajectories which
+violate the Hamiltonian dynamic, resulting in many divergences.
+The NUTS-HMC sampler sets an upper bound on $L$, the number of steps, at $2^{\mathrm{max\_treedepth}} - 1$.
+With a small step size, during sampling every trajectory makes almost no progress before hitting this upper bound.
+Not only does the sampler fails to properly explore the posterior, it fails very slowly.
+
+## Visualization: easy and difficult posterior geometries.
+
+An easy posterior density for HMC is a Gaussian: its Hessian is the same at every point.
+Easiest of all is the isotropic Gaussian which has identical curvature in every direction at every point.
 Conversely, a challenging posterior density is one which
 has curvature that changes rapidly across the region
 of substantial posterior probability or differs greatly across directions.
 
-The canonical example of a challenging posterior density is [Neal's funnel](https://mc-stan.org/docs/stan-users-guide/efficiency-tuning.html#funnel.figure), after @Neal:2003.
-Section 8 of this article defines a distribution that exemplifies the difficulties of sampling from some hierarchical models
-which has support for $y \in \mathbb{R}$ and $x \in \mathbb{R}^9$ with density
+The canonical example of a challenging posterior density is [Neal's funnel](https://mc-stan.org/docs/stan-users-guide/efficiency-tuning.html#funnel.figure), after @Neal:2003
+which defines a distribution that exemplifies the difficulties of sampling from some hierarchical models.
+This distribution has support for $y \in \mathbb{R}$ and $x \in \mathbb{R}^9$ with density
 $$
 p(y,x) = \textsf{normal}(y \mid 0,3) \times \prod_{n=1}^9
 \textsf{normal}(x_n \mid 0,\exp(y/2)).
 $$
 
-::: {.column-margin}
-![Neal's funnel](img/funnel.png)
-:::
+An isotropic Gaussian on the same space would have density
 
-At left we show the plot on the log scale of $x[1], y$ .
-The probability contours are shaped like ten-dimensional funnels.  The
-funnel's neck is particularly sharp because of the exponential
-function applied to $y$.
+$$
+p(y,x) = \textsf{normal}(y \mid 0,1) \times \prod_{n=1}^9 \textsf{normal}(x_n \mid 0,1).
+$$
 
-Following Betancourt and Girolami,  $y$ is the global parameter $\phi$, and $x$ is local parameter $\theta$.
-Given these names, this distribution can be coded in Stan as follows.
+Both distributions are defined on the same space.
+The funnel distribution is hierarchical; the scale of the elements of $x$ depends on the global parameter $y$.
+The isotropic Gaussian is merely the product of ten normal distributions.
+Below we show the contour plots on the log scale for $x[1], y$ of the density for each.
+
+![Easy and hard density plots](plots/easy_vs_hard.png)
+
+The isotropic Gaussian contours are spherical.
+The probability contours of the funnel are shaped like ten-dimensional funnels (hence the name).  The
+funnel's neck is particularly sharp because of the exponential function applied to $y$.
+
+### Centered and non-centered parameterizations
+
+We write the Stan model corresponding to Neal's funnel.   The natural encoding in Stan is called the "centered parameterization".
 
 ```stan
 parameters {
-  real phi;
-  vector[9] theta;
+  real y;
+  vector[9] x;
 }
 model {
-  phi ~ normal(0, 3);
-  theta ~ normal(0, exp(phi/2));
+  y ~ normal(0, 3);
+  x ~ normal(0, exp(y/2));
 }
+```
+
+The non-centered parameterization shifts the correlation from the parameters to auxiliary variables
+declared in the `transformed parameters` block.
+
+```
+parameters {
+  real y_raw;
+  vector[9] x_raw;
+}
+transformed parameters {
+  real y;
+  vector[9] x;
+
+  y = 3.0 * y_raw;
+  x = exp(y/2) * x_raw;
+}
+model {
+  y_raw ~ std_normal(); // implies y ~ normal(0, 3)
+  x_raw ~ std_normal(); // implies x ~ normal(0, exp(y/2))
+}
+```
+
+The non-centered version samples two standard normal variables and
+builds `y` and `x` from them by scaling: `y = 3 * y_raw`
+stretches a unit normal to scale `3`,
+and `x = exp(y/2) * x_raw` stretches a unit normal to scale `exp(y/2)`.
+The declared parameters are now `y_raw` and `x_raw`,
+whose distribution is a fixed isotropic Gaussian.
+All of the dependence between the scale of `x` and the value of `y`
+has been moved into the deterministic transform.
+The target distribution over $(y, x)$ is unchanged;
+what changes is the coordinate system the sampler moves in.
+
+We run both models to get a sample from the target distribution.
+First we run the centered parameterization.
+
+```{python}
+# centered parameterization:  compile, run, get sample, create plot
+funnel_priors_cp_stan = os.path.join('stan', 'funnel_priors_cp.stan')
+funnel_priors_cp = CmdStanModel(stan_file=funnel_priors_cp_stan)
+funnel_priors_cp_fit = funnel_priors_cp.sample(seed=4242, show_progress=False)
+cp_summary = funnel_priors_cp_fit.summary(sig_figs=3)
+```
+The centered parameterization produces a difficult target density; the sampler almost always reports several divergences.
+The random seed used here produces many divergences for chain 4.
+
+
+Then we run the non-centered parameterization, using the same random seed.
+This produces no divergences.
+```{python}
+# non-centered parameterization:  compile, run, get sample, create plots
+funnel_priors_ncp_stan = os.path.join('stan', 'funnel_priors_ncp.stan')
+funnel_priors_ncp = CmdStanModel(stan_file=funnel_priors_ncp_stan)
+funnel_priors_ncp_fit = funnel_priors_ncp.sample(seed=4242, show_progress=False)
+ncp_summary = funnel_priors_ncp_fit.summary(sig_figs=3)
+```
+
+The model specifies that `y` should has mean $0$ and standard deviation of $3$.
+We report the model fits for the mean, standard deviation, along with the diagnostics `ESS_bulk` and `R_hat`.
+The [$\hat{R}$ statistic ](https://mc-stan.org/docs/reference-manual/analysis.html#potential-scale-reduction) measures convergence.
+The general recommendation is that this should be less than $1.01$.
+The sampler returns 4000 draws, however because we are doing MCMC, these are not independent;
+the [Effective Sample Size](https://mc-stan.org/docs/reference-manual/analysis.html#effective-sample-size.section)
+accounts for correlations (or anti-correlations).
+
+The centered parameterization shows poor convergence, extremely low ESS_bulk; and a biased estimate of `y`.
+
+```{python}
+cp_summary.loc[['y'], ['Mean', 'StdDev', 'ESS_bulk', 'R_hat']]
+```
+
+The non-centered parametization does quite well.
+Note that both `y` and `y_raw` have identical ESS_bulk; this is because
+the non-centered transform is a deterministic rescaling of `y`.
+
+```{python}
+ncp_summary.loc[['y', 'y_raw'], ['Mean', 'StdDev', 'ESS_bulk', 'R_hat']]
+```
+
+We create plots from the returned samples.
+
+```{python}
+funnel_plot_cp = plot_divergences(fit=funnel_priors_cp_fit, 
+                                  x_var='x[1]', 
+                                  y_var='y', 
+                                  title='Neal\'s funnel centered parameterization',
+                                  subtitle='target distribution - parameters x[1], y')
+
+funnel_plot_ncp_params = plot_divergences(fit=funnel_priors_ncp_fit, 
+                                  x_var='x_raw[1]', 
+                                  y_var='y_raw', 
+                                  title='Neal\'s funnel non-centered parameterization',
+                                  subtitle='target distribution - parameters x_raw[1], y_raw')
+
+funnel_plot_ncp_xforms = plot_divergences(fit=funnel_priors_ncp_fit, 
+                                  x_var='x[1]', 
+                                  y_var='y', 
+                                  title='Neal\'s funnel non-centered parameterization',
+                                  subtitle='transformed parameters x[1], y')
 ```
 
 
 
-(mention Stan's [affine-transform](https://mc-stan.org/docs/reference-manual/types.html#affine-transform.section) 
-The same model can be [reparameterized](SUG reparameterization discussion).
 
-The first parameterization is known as the *centered parameterization* and the second is the *non-centered parameterization* (cite Papa et al).
+## How the sampling distribution changes the posterior
 
-These plots show the posterior geometry of the distribution; these are essentially plots of the *prior* distribution, without respect to the likelihood,
-the distribution of the prior conditioned on the data.
-Different data regimes produce different posterior geometries; some posterior geometries are more difficult for the sampler to explore.
-The Stan User's Guide and key Stan case studies (which have been translated into other PPL frameworks),
-provide small example datasets for which the non-centered parameterization is more efficient.
-However this is not always the case.
+In a hierarchical model, the funnel distribution corresponds to the natural encoding of
+the priors in a hierarchical model, taking $y$ as some global parameter
+over a set of groups, (cardinality 9 the funnel example), where each group has local parameter $x$.
+However the posterior distribution is the prior times the data model:  $\mathrm{p}(y \mid \theta)$.
 
-To illustrate, we write the data-generating model corresponding to hierarchical structure of the Neal's funnel model and generate several datasets of increasing size.
+::: {.column-margin}
+Here we follow @Bayesian-Workflow:2026, per discussion in section 5.4.
+The sampling distribution was formerly known as the `likelihood` when the data is fixed and $\theta$ is conditioned on $y$,
+but is can also denote the data model when the parameters are fixed and $y$ is conditioned on $\theta$.
+:::
+
+
+Given the hierarchical priors, we define a simple hierarchical logistic regression.
+For fixed number of groups (9) and a specified number of binary trials ('N'), we record the number of successful outcomes for each group.
+
+```stan
+data {
+  int<lower=0> N;                     // count trials
+  array[9] int<lower=0, upper=N> y;   // count successes
+}
+```
+
+We follow the convention of using `y` for modeled data, and `x for unmodeled data,
+and `N` for dimension size variable names, adding subscripts as needed,
+e.g. to generalize this from 9 groups to any number of groups,
+we would define variables `N_groups`, and `N_obs`.
+We use greek letter names for the parameters.
+
+Neal's example is a particularly sharply curved posterior.
+Here we use a model with a less extreme version of the funnel geometry.
+
+```stan
+parameters {
+  real<lower=0> sigma;
+  vector[9] theta;                   // log odds success
+}
+model {
+  sigma ~ normal(0, 3);
+  theta ~ normal(0, sigma);
+  y ~ binomial_logit(N, theta);
+}
+```
+
+The corresponding non-centered model follows the example in the [Stan User's Guide](https://mc-stan.org/docs/stan-users-guide/efficiency-tuning.html#non-centered-parameterization)
+
+```stan
+parameters {
+  real<lower=0> sigma;
+  vector[9] theta_raw;
+}
+transformed parameters {
+  vector[9] theta;                     // log odds success
+  theta = sigma * theta_raw;
+}
+model {
+  sigma ~ normal(0, 3);
+  theta_raw ~ std_normal();
+  y ~ binomial_logit(N, theta);
+}
+```
+
+Stan's [affine transform](https://mc-stan.org/docs/reference-manual/types.html#affinely-transformed-real)
+can also be used to decouple `sigma` and `theta` programmatically by declaring `theta` as:
+
+```stan
+vector<multiplier=sigma>[9] theta;
+```
+
+With the affine transform constraint, the parameters and model blocks become:
+
+```stan
+parameters {
+  real<lower=0> sigma;
+  vector<multiplier=sigma>[9] theta;  // log odds success
+}
+model {
+  sigma ~ normal(0, 3);
+  theta ~ normal(0, sigma);
+  y ~ binomial_logit(N, theta);
+}
+```
+
+Stan parameters are declared on the constrained scale, and the sampler works on the unconstrained
+scale. For `real<lower=0> sigma`, the declared variable is `sigma` and the sampler moves in `log(sigma)`.
+For `vector<multiplier=sigma>[9] theta`, the declared variable is `theta` and the sampler moves
+in `theta_raw = theta / sigma`. In both cases Stan adds the Jacobian automatically, so the model block
+is written entirely in terms of the declared variable. That is why `theta ~ normal(0, sigma)` here is
+exactly the `theta_raw ~ std_normal()` of the by-hand version: same target density, same sampling
+space, with the transform moved from the transformed parameters block into the declaration.
+
+### Which parameterization and why?
+
+For a well-specified model, these alternative parameterizations should produce
+exactly the same posterior estimates for all parameters.
+But we are using MCMC methods to compute these estimates.
+
+However, 
+The difference is the amount of computation required for the MCMC sampler, either Gibbs or NUTS-HMC, to achieve satisfactory R-hat and ESS for those parameters and this difference is due to the nature of the data the model is trying to fit.
+To illustrate, we write the data-generating model corresponding to hierarchical structure
+of the Neal's funnel model and generate several datasets of increasing size.
 Then we fit these datasets using both the centered and non-centered parameterizations and compare the resulting samples.
 
 
 
-For a well-specified model, these alternative parameterizations should produce exactly the same posterior estimates for all parameters.
-The difference is the amount of computation required for the MCMC sampler, either Gibbs or NUTS-HMC, to achieve satisfactory R-hat and ESS for those parameters and this difference is due to the nature of the data the model is trying to fit.
 
 This is due the sampler algorithm.  When a hierarchical model seems to be making slow progress and the resulting diagnostics are less than satisfactory - poor ESS, many iterations at maximum tree-depth -
 changing from a centered to non-centered parameterization, or vice-verse, may be in order.
 
 
 
+## Hierarchical regression, varying-slope varying-intercept version
 
-## Reparameterizing a single hierarchical regression coefficient
-
-## Reparameterizing a vector of regression coefficients
 
 ## Reparametrizing auto-regressive coefficients
 
