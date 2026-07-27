@@ -98,7 +98,7 @@ This case study expands on that example and provides further examples of reparam
 ## Hierarchical models and MCMC samplers
 
 A Bayesian model with $N$ parameters defines a probability density over a $N$-dimensional parameter space.
-There are many names for hierarhcical models and their components.
+There are many names for hierarchical models and their components.
 Here we follow the terminology of @Betancourt-Girolami:2013.
 At the left is Figure 1 from that paper which shows the structure of a simple hierarchical model
 where each data item consists of both an observed value and a membership id for the group it belongs to.
@@ -162,7 +162,7 @@ used to follow the Hamiltonian.
 Every step requires computing gradient of the posterior density at that point; this is computationally expensive.
 
 HMC simulates the (discretized) Hamiltonian trajectory of a particle which,
-given a refresh of random momentum at each iteraction,
+given a refresh of random momentum at each iteration,
 traces a path through the parameter space.
 The mass matrix is used to provide this momentum.
 The [Stan Reference Manual MCMC chapter](https://mc-stan.org/docs/reference-manual/mcmc.html) 
@@ -203,7 +203,7 @@ During warmup (adaptation) Stan's NUTS-HMC sampler estimates the step size and m
 The number of steps $L$ is determined dynamically for each iteration according to the "No-U-Turn" algorithm
 introduced in @Hoffman-Gelman:2014 and refined in @Betancourt:2017.
 
-If the posterior is (approximately) multivarite normal (Gaussian)
+If the posterior is (approximately) multivariate normal (Gaussian)
 then the mass matrix is a linear map that transforms it
 it into an isotropic Gaussian which is the easiest geometry for HMC.
 The transformed target is a perfectly round bowl:
@@ -337,16 +337,20 @@ accounts for correlations (or anti-correlations).
 The centered parameterization shows poor convergence, extremely low ESS_bulk; and a biased estimate of `y`.
 
 ```{python}
-cp_summary.loc[['y'], ['Mean', 'StdDev', 'ESS_bulk', 'R_hat']]
+cp_summary.loc[['y'], ['Mean', 'StdDev', 'ESS_bulk', 'ESS_bulk/s', 'R_hat']]
 ```
 
-The non-centered parametization does quite well.
+The non-centered parametrization does quite well.
 Note that both `y` and `y_raw` have identical ESS_bulk; this is because
 the non-centered transform is a deterministic rescaling of `y`.
 
 ```{python}
-ncp_summary.loc[['y', 'y_raw'], ['Mean', 'StdDev', 'ESS_bulk', 'R_hat']]
+ncp_summary.loc[['y', 'y_raw'], ['Mean', 'StdDev', 'ESS_bulk', 'ESS_bulk/s', 'R_hat']]
 ```
+
+Note the difference in `ESS_bulk/s`:  this is quantity `ESS_bulk` divided by
+the total sampling time (i.e., excluding warmup) across all chains.
+The non-centered parameterization is over 1000 times faster!
 
 We create plots from the returned samples.
 
@@ -370,25 +374,62 @@ funnel_plot_ncp_xforms = plot_divergences(fit=funnel_priors_ncp_fit,
                                   subtitle='transformed parameters x[1], y')
 ```
 
+First we show the space the sampler actually moves in:
+`x_raw[1]` and `y_raw` for the non-centered parameterization (left)
+and parameters `x[1]` and `y` for the centered parameterization (right).
+The sampler sees the isotropic Gaussian in the non-centered version
+and the funnel in the centered one, matching the analytic plots from the previous section.
 
+
+```{python}
+#| layout-ncol: 2
+funnel_plot_ncp_params.show()
+funnel_plot_cp.show()
+```
+
+Red dots indicate divergent transitions; points where the sampler failed
+to follow a legal Hamiltonian trajectory at that iteration.
+For the centered parameterization, these points are all in the neck of the funnel.
+The non-centered parameterization had no divergences anywhere.
+This is as expected; the isotropic Gaussian is an easy density for the HMC sampler
+and the funnel is a difficult one.
+
+Next we plot the variables that the target distribution is stated in:  `x[1]` vs `y`.
+
+```{python}
+#| layout-ncol: 2
+funnel_plot_ncp_xforms.show()
+funnel_plot_cp.show()
+```
+
+These two plots show the funnel density; the differences are that the non-centered parameterization
+is able to explore more of the funnel, especially further into the neck, without any divergences.
 
 
 ## How the sampling distribution changes the posterior
 
-In a hierarchical model, the funnel distribution corresponds to the natural encoding of
-the priors in a hierarchical model, taking $y$ as some global parameter
-over a set of groups, (cardinality 9 the funnel example), where each group has local parameter $x$.
-However the posterior distribution is the prior times the data model:  $\mathrm{p}(y \mid \theta)$.
+Given the summary statistics, diagnostics, and plots shown in the previous section,
+one might conclude that the non-centered parameterization should always be used
+when using MCMC methods to fit hierarchical models.
+This overlooks a critical detail: those analyses were of the behavior of the model
+in the absence of data, i.e., they explored the prior density $p(\theta)$.
+However, the posterior is proportional to the prior times the data model:
+$$
+p(\theta \mid y) \propto p(\theta) \, p(y \mid \theta)
+$$
+The data contributes its own geometry, and with enough data it, not the prior,
+determines the shape the sampler sees.
 
 ::: {.column-margin}
 Here we follow @Bayesian-Workflow:2026, per discussion in section 5.4.
-The sampling distribution was formerly known as the `likelihood` when the data is fixed and $\theta$ is conditioned on $y$,
-but is can also denote the data model when the parameters are fixed and $y$ is conditioned on $\theta$.
+The data model is often termed the `likelihood` as a function of $\theta$ when the data is fixed
+and the `sampling distribution` as a distribution over `y` when $\theta$ is fixed.
 :::
 
-
-Given the hierarchical priors, we define a simple hierarchical logistic regression.
-For fixed number of groups (9) and a specified number of binary trials ('N'), we record the number of successful outcomes for each group.
+To see how this works, we add the data model to these Stan programs 
+to define a simple hierarchical logistic regression.
+For fixed number of groups (9) and a specified number of binary trials ('N'),
+we record the number of successful outcomes for each group.
 
 ```stan
 data {
@@ -418,7 +459,8 @@ model {
 }
 ```
 
-The corresponding non-centered model follows the example in the [Stan User's Guide](https://mc-stan.org/docs/stan-users-guide/efficiency-tuning.html#non-centered-parameterization)
+The corresponding non-centered model follows the example in the
+[Stan User's Guide](https://mc-stan.org/docs/stan-users-guide/efficiency-tuning.html#non-centered-parameterization)
 
 ```stan
 parameters {
@@ -465,23 +507,16 @@ is written entirely in terms of the declared variable. That is why `theta ~ norm
 exactly the `theta_raw ~ std_normal()` of the by-hand version: same target density, same sampling
 space, with the transform moved from the transformed parameters block into the declaration.
 
-### Which parameterization and why?
 
-For a well-specified model, these alternative parameterizations should produce
-exactly the same posterior estimates for all parameters.
-But we are using MCMC methods to compute these estimates.
-
-However, 
-The difference is the amount of computation required for the MCMC sampler, either Gibbs or NUTS-HMC, to achieve satisfactory R-hat and ESS for those parameters and this difference is due to the nature of the data the model is trying to fit.
-To illustrate, we write the data-generating model corresponding to hierarchical structure
-of the Neal's funnel model and generate several datasets of increasing size.
-Then we fit these datasets using both the centered and non-centered parameterizations and compare the resulting samples.
+These alternative parameterizations should produce
+exactly the same posterior estimates for all parameters;
+and given sufficient computing time, the HMC sampler should do so.
+But we have a fixed compute budget and/or limited time.
+The question becomes, which parameterization is most efficient in which data regime?
+To explore the problem, we generate datasets of different sizes and then fit them
+using both the centered and non-centered parameterizations and compare the resulting samples.
 
 
-
-
-This is due the sampler algorithm.  When a hierarchical model seems to be making slow progress and the resulting diagnostics are less than satisfactory - poor ESS, many iterations at maximum tree-depth -
-changing from a centered to non-centered parameterization, or vice-verse, may be in order.
 
 
 
