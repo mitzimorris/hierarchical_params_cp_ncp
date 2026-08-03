@@ -120,23 +120,29 @@ and they do so according to Bayes's theorem:
 \begin{align}
 \underbrace{p(\textrm{params} \mid \textrm{data})}_{\textrm{posterior}}
 &\propto
-\underbrace{p(\textrm{data} \mid \textrm{params})}_{\textrm{sampling}}
+\underbrace{p(\textrm{data} \mid \textrm{params})}_{\textrm{data model}}
 \cdot
 \underbrace{p(\textrm{params})}_{\textrm{prior}}
 \\[4pt]
 \end{align}
 
+::: {.column-margin}
+Here we follow @Bayesian-Workflow:2026, section 5.4.
+The data model is often termed the *likelihood* as a function of $\theta$ when the data is fixed
+and the *sampling distribution* as a distribution over $y$ when $\theta$ is fixed.
+:::
+
 In the absence of data, the posterior distribution is the prior distribution.
 When analyzing $n$ data points, the prior comes in once
-and the sampling distribution enters the posterior $n$ times.
-Thus both the data and the amount of data determine how
+and the data model enters the posterior $n$ times.
+Thus both the data model and the amount of data determine how
 the geometry of the posterior density evolves from the prior.
 
 ### Stan's NUTS-HMC algorithm
 
 A general understanding of the HMC algorithm is needed in order to
 understand why the parameterization of hierarchical models is challenging for HMC.
-The algorithm works with three related quantities.
+The HMC algorithm works with three related quantities.
 
 * *Posterior density*: the probability per unit volume near a point (because any given point has zero probability).
 Stan works with the unnormalized log posterior density $\log p(\theta \mid y) + const$.
@@ -199,7 +205,10 @@ The well-tuned HMC sampler requires that:
 - the step-size small enough to produce trajectories that obey Hamiltonian dynamics but no smaller.
 - the mass matrix is a good linear pre-conditioner.
 
-During warmup (adaptation) Stan's NUTS-HMC sampler estimates the step size and mass matrix given the model and the data.
+During warmup (adaptation) Stan's NUTS-HMC sampler estimates the step size and mass matrix in tandem given the model and the data.
+The optimal step size is small enough to accurately follow the Hamiltonian flow
+and no smaller since the smaller the step size, the more steps are needed to complete the trajectory
+and the greater the computational cost.
 The number of steps $L$ is determined dynamically for each iteration according to the "No-U-Turn" algorithm
 introduced in @Hoffman-Gelman:2014 and refined in @Betancourt:2017.
 
@@ -207,30 +216,27 @@ If the posterior is (approximately) multivariate normal (Gaussian)
 then the mass matrix is a linear map that transforms it
 it into an isotropic Gaussian which is the easiest geometry for HMC.
 The transformed target is a perfectly round bowl:
-every direction has the same curvature, and a *single step size is accurate everywhere*.
-During warmup the step size is adjusted in tandem with mass matrix estimation.
-The optimal step size is small enough to accurately follow the Hamiltonian flow
-and no smaller since the smaller the step size, the more steps are needed to complete the trajectory
-and the greater the computational cost.
+every direction has the same curvature, and a single step size is accurate everywhere.
 
-When the when the posterior curvature (i.e., the Hessian) varies through the target density
-is impossible to find a mass matrix which works as a global preconditioner.
-The sampler struggles to do so during warmup, and in so doing, sets the step size smaller and smaller.
-Given a poor approximation to the mass matrix, the random momentum refresh leads to trajectories which
+When the when the posterior curvature (i.e., the Hessian) varies through the target density,
+it is impossible to find a mass matrix which works as a global preconditioner.
+During warmup the sampler struggles to estimate the mass matrix.
+With a poor mass matrix the random momentum refresh leads to trajectories which
 violate the Hamiltonian dynamic, resulting in many divergences.
-The NUTS-HMC sampler sets an upper bound on $L$, the number of steps, at $2^{\mathrm{max\_treedepth}} - 1$.
+To avoid divergences, the step size is adjusted downwards.
+The NUTS-HMC sampler sets an upper bound on the number of steps, at $2^{\mathrm{max\_treedepth}} - 1$.
 With a small step size, during sampling every trajectory makes almost no progress before hitting this upper bound.
-Not only does the sampler fails to properly explore the posterior, it fails very slowly.
+Not only does the sampler fail to properly explore the posterior, it fails very slowly.
 
-## Visualization: easy and difficult posterior geometries.
+## Visualization: easy and difficult target densities
 
-An easy posterior density for HMC is a Gaussian: its Hessian is the same at every point.
+An easy target density for HMC is a Gaussian: its Hessian is the same at every point.
 Easiest of all is the isotropic Gaussian which has identical curvature in every direction at every point.
-Conversely, a challenging posterior density is one which
+Conversely, a challenging density is one which
 has curvature that changes rapidly across the region
-of substantial posterior probability or differs greatly across directions.
+of substantial probability or differs greatly across directions.
 
-The canonical example of a challenging posterior density is [Neal's funnel](https://mc-stan.org/docs/stan-users-guide/efficiency-tuning.html#funnel.figure), after @Neal:2003
+The canonical example of a challenging target density is [Neal's funnel](https://mc-stan.org/docs/stan-users-guide/efficiency-tuning.html#funnel.figure), after @Neal:2003
 which defines a distribution that exemplifies the difficulties of sampling from some hierarchical models.
 This distribution has support for $y \in \mathbb{R}$ and $x \in \mathbb{R}^9$ with density
 $$
@@ -255,7 +261,7 @@ The isotropic Gaussian contours are spherical.
 The probability contours of the funnel are shaped like ten-dimensional funnels (hence the name).  The
 funnel's neck is particularly sharp because of the exponential function applied to $y$.
 
-### Centered and non-centered parameterizations
+## Centered and non-centered parameterizations
 
 We write the Stan model corresponding to Neal's funnel.   The natural encoding in Stan is called the "centered parameterization".
 
@@ -314,7 +320,6 @@ cp_summary = funnel_priors_cp_fit.summary(sig_figs=3)
 ```
 The centered parameterization produces a difficult target density; the sampler almost always reports several divergences.
 The random seed used here produces many divergences for chain 4.
-
 
 Then we run the non-centered parameterization, using the same random seed.
 This produces no divergences.
@@ -406,7 +411,7 @@ These two plots show the funnel density; the differences are that the non-center
 is able to explore more of the funnel, especially further into the neck, without any divergences.
 
 
-## How the sampling distribution changes the posterior
+## First hierarchical model: simple logistic regression
 
 Given the summary statistics, diagnostics, and plots shown in the previous section,
 one might conclude that the non-centered parameterization should always be used
@@ -420,11 +425,6 @@ $$
 The data contributes its own geometry, and with enough data it, not the prior,
 determines the shape the sampler sees.
 
-::: {.column-margin}
-Here we follow @Bayesian-Workflow:2026, per discussion in section 5.4.
-The data model is often termed the `likelihood` as a function of $\theta$ when the data is fixed
-and the `sampling distribution` as a distribution over `y` when $\theta$ is fixed.
-:::
 
 To see how this works, we add the data model to these Stan programs 
 to define a simple hierarchical logistic regression.
@@ -438,7 +438,7 @@ data {
 }
 ```
 
-We follow the convention of using `y` for modeled data, and `x for unmodeled data,
+We follow the convention of using `y` for modeled data, and `x` for unmodeled data,
 and `N` for dimension size variable names, adding subscripts as needed,
 e.g. to generalize this from 9 groups to any number of groups,
 we would define variables `N_groups`, and `N_obs`.
@@ -507,7 +507,6 @@ is written entirely in terms of the declared variable. That is why `theta ~ norm
 exactly the `theta_raw ~ std_normal()` of the by-hand version: same target density, same sampling
 space, with the transform moved from the transformed parameters block into the declaration.
 
-
 These alternative parameterizations should produce
 exactly the same posterior estimates for all parameters;
 and given sufficient computing time, the HMC sampler should do so.
@@ -516,7 +515,32 @@ The question becomes, which parameterization is most efficient in which data reg
 To explore the problem, we generate datasets of different sizes and then fit them
 using both the centered and non-centered parameterizations and compare the resulting samples.
 
+### Simulating data
 
+We can check that a Stan model is well-specified by writing the corresponding data-generating program
+and then fitting the model on the generated data.
+We use this procedure to generate a series of test datasets of sizes:  2, 4, 8, 16, 64, 256, 1024, 16384.
+Here is the Stan code:
+
+```stan
+data {
+  int<lower=0> N_groups;
+  int<lower=0> N_obs;
+}
+generated quantities {
+  vector[N_groups] theta;
+  array[N_groups] int<lower=0, upper=N_obs> y;
+  for (i in 1:N_groups) {
+    theta[i] = std_normal_rng();  // mu = 0, sigma = 1
+    y[i] = binomial_rng(N_obs, inv_logit(theta[i]));
+  }
+}
+```
+
+For each group we record `theta`, the log-odds of success, and `y`, the number of successes from N_obs trials.
+
+
+  
 
 
 
