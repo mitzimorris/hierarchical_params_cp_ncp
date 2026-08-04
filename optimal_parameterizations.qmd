@@ -30,6 +30,8 @@ include-in-header:
           width: auto;
         }
       </style>
+filters:
+   - include-code-files
 execute:
   engine: jupyter
 ---
@@ -38,11 +40,15 @@ execute:
 ```{python}
 # libraries used in this notebook
 #| output: false
-#| echo: false
+
 import os
 import numpy as np
 import pandas as pd
 import plotnine as p9
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
+
 from cmdstanpy import CmdStanModel, CmdStanMCMC
 
 def plot_divergences(
@@ -83,6 +89,7 @@ def plot_divergences(
 
 p9.options.figure_size = (6, 6)
 p9.options.dpi = 100
+np.set_printoptions(precision=3)
 ```
 
 ## Overview
@@ -265,36 +272,13 @@ funnel's neck is particularly sharp because of the exponential function applied 
 
 We write the Stan model corresponding to Neal's funnel.   The natural encoding in Stan is called the "centered parameterization".
 
-```stan
-parameters {
-  real y;
-  vector[9] x;
-}
-model {
-  y ~ normal(0, 3);
-  x ~ normal(0, exp(y/2));
-}
+```{.stan include="stan/funnel_priors_cp.stan"}
 ```
 
 The non-centered parameterization shifts the correlation from the parameters to auxiliary variables
 declared in the `transformed parameters` block.
 
-```
-parameters {
-  real y_raw;
-  vector[9] x_raw;
-}
-transformed parameters {
-  real y;
-  vector[9] x;
-
-  y = 3.0 * y_raw;
-  x = exp(y/2) * x_raw;
-}
-model {
-  y_raw ~ std_normal(); // implies y ~ normal(0, 3)
-  x_raw ~ std_normal(); // implies x ~ normal(0, exp(y/2))
-}
+```{.stan include="stan/funnel_priors_ncp.stan"}
 ```
 
 The non-centered version samples two standard normal variables and
@@ -407,8 +391,11 @@ funnel_plot_ncp_xforms.show()
 funnel_plot_cp.show()
 ```
 
-These two plots show the funnel density; the differences are that the non-centered parameterization
-is able to explore more of the funnel, especially further into the neck, without any divergences.
+These two plots show the funnel density.
+Note that for the non-centered parameterization the y-axis ranges from $(-10, 10)$, while the
+centered parameterization only ranges from $(-5, 10)$.
+The non-centered parameterization is able to explore more of the funnel,
+especially further into the neck, without any divergences.
 
 
 ## First hierarchical model: simple logistic regression
@@ -442,70 +429,30 @@ We follow the convention of using `y` for modeled data, and `x` for unmodeled da
 and `N` for dimension size variable names, adding subscripts as needed,
 e.g. to generalize this from 9 groups to any number of groups,
 we would define variables `N_groups`, and `N_obs`.
-We use greek letter names for the parameters.
-
-Neal's example is a particularly sharply curved posterior.
-Here we use a model with a less extreme version of the funnel geometry.
+Instead of parameter `x` in the Neal's funnel model we use `theta`.
+The example model definition of the hierarchical scale parameter is in terms
+of the unconstrained real parameter `y`, which is used as the scale parameter for the prior on `x` as follows
 
 ```stan
-parameters {
-  real<lower=0> sigma;
-  vector[9] theta;                   // log odds success
-}
-model {
-  sigma ~ normal(0, 3);
-  theta ~ normal(0, sigma);
-  y ~ binomial_logit(N, theta);
-}
+x ~ normal(0, exp(y/2));  // implies scale is log(y^2)
+```
+
+This produces a sharply curved funnel with a long neck.
+Note also that because the exponentiation creates a positive value,
+this parameter can be declared without the usual `<lower=0>` constraint that
+would otherwise be necessary.
+Here we rename `y` to `log_sigma_sq`.
+The centered parameterization data model is
+
+```{.stan include="stan/funnel_data_cp.stan"}
 ```
 
 The corresponding non-centered model follows the example in the
 [Stan User's Guide](https://mc-stan.org/docs/stan-users-guide/efficiency-tuning.html#non-centered-parameterization)
 
-```stan
-parameters {
-  real<lower=0> sigma;
-  vector[9] theta_raw;
-}
-transformed parameters {
-  vector[9] theta;                     // log odds success
-  theta = sigma * theta_raw;
-}
-model {
-  sigma ~ normal(0, 3);
-  theta_raw ~ std_normal();
-  y ~ binomial_logit(N, theta);
-}
+```{.stan include="stan/funnel_data_ncp.stan"}
 ```
 
-Stan's [affine transform](https://mc-stan.org/docs/reference-manual/types.html#affinely-transformed-real)
-can also be used to decouple `sigma` and `theta` programmatically by declaring `theta` as:
-
-```stan
-vector<multiplier=sigma>[9] theta;
-```
-
-With the affine transform constraint, the parameters and model blocks become:
-
-```stan
-parameters {
-  real<lower=0> sigma;
-  vector<multiplier=sigma>[9] theta;  // log odds success
-}
-model {
-  sigma ~ normal(0, 3);
-  theta ~ normal(0, sigma);
-  y ~ binomial_logit(N, theta);
-}
-```
-
-Stan parameters are declared on the constrained scale, and the sampler works on the unconstrained
-scale. For `real<lower=0> sigma`, the declared variable is `sigma` and the sampler moves in `log(sigma)`.
-For `vector<multiplier=sigma>[9] theta`, the declared variable is `theta` and the sampler moves
-in `theta_raw = theta / sigma`. In both cases Stan adds the Jacobian automatically, so the model block
-is written entirely in terms of the declared variable. That is why `theta ~ normal(0, sigma)` here is
-exactly the `theta_raw ~ std_normal()` of the by-hand version: same target density, same sampling
-space, with the transform moved from the transformed parameters block into the declaration.
 
 These alternative parameterizations should produce
 exactly the same posterior estimates for all parameters;
@@ -519,28 +466,319 @@ using both the centered and non-centered parameterizations and compare the resul
 
 We can check that a Stan model is well-specified by writing the corresponding data-generating program
 and then fitting the model on the generated data.
-We use this procedure to generate a series of test datasets of sizes:  2, 4, 8, 16, 64, 256, 1024, 16384.
+We use this procedure to generate a series of observations of repeated binary trials
+with a given probability of success `theta`.
 Here is the Stan code:
 
-```stan
-data {
-  int<lower=0> N_groups;
-  int<lower=0> N_obs;
-}
-generated quantities {
-  vector[N_groups] theta;
-  array[N_groups] int<lower=0, upper=N_obs> y;
-  for (i in 1:N_groups) {
-    theta[i] = std_normal_rng();  // mu = 0, sigma = 1
-    y[i] = binomial_rng(N_obs, inv_logit(theta[i]));
-  }
-}
+```{.stan include="stan/datagen_repeated_binary_trials.stan"}
 ```
 
-For each group we record `theta`, the log-odds of success, and `y`, the number of successes from N_obs trials.
+For each group we record `theta`, the log-odds of success.
+Given the sequence of repeated binary trials, we can create datasets for any number of observations.
+From this raw data, we will create a series of nested datasets of the following sizes:
+$2, 4, 8, 16, 64, 256, 2048, 32768$.
+
+First we generate the raw data.
+
+```{python}
+N_GROUPS = 9
+N_OBS = (2, 4, 8, 16, 64, 256, 2048, 32768)
+
+datagen_stan = os.path.join('stan', 'datagen_repeated_binary_trials.stan')
+datagen = CmdStanModel(stan_file=datagen_stan)
+simulation = datagen.sample(
+    data={"N_groups": N_GROUPS, "N_obs": max(N_OBS)},
+    chains=1,
+    iter_warmup=0,
+    iter_sampling=1,
+    adapt_engaged=False,
+    show_progress=False,
+    seed=12345,
+)
+
+theta_true = simulation.stan_variable("theta")[0]
+trials = simulation.stan_variable("y")[0].astype(int)
+```
+
+Next we create the nested datasets.
+```{python}
+def make_nested_datasets(
+    trials: np.ndarray, n_obs_values: Sequence[int]
+) -> dict[int, dict[str, object]]:
+    """Create Stan datasets from cumulative success counts."""
+    cumulative_successes = np.cumsum(trials, axis=0)
+    return {
+        n_obs: {
+            "N": n_obs,
+            "y": cumulative_successes[n_obs - 1].tolist(),
+        }
+        for n_obs in n_obs_values
+    }
+
+datasets = make_nested_datasets(trials, N_OBS)
+
+print(f'theta {theta_true}')
+
+pd.DataFrame(
+    {
+        "N": N_OBS,
+        "successes by group": [datasets[n_obs]["y"] for n_obs in N_OBS],
+    }
+)
+```
+
+### Fitting both models
+
+We instantiate both models.
+
+```{python}
+funnel_cp_stan = os.path.join('stan', 'funnel_data_cp.stan')
+funnel_cp = CmdStanModel(stan_file=funnel_cp_stan)
+funnel_ncp_stan = os.path.join('stan', 'funnel_data_ncp.stan')
+funnel_ncp = CmdStanModel(stan_file=funnel_ncp_stan)
+```
+
+We fit both models on the eight nested datasets.
+To organize this work, we create a two helper classes
+that index the models, the parameters of interest, and the returned samples.
+```{python}
+@dataclass(frozen=True)
+class Parameterization:
+    label: str
+    model: CmdStanModel
+    sampled_x: str
+
+@dataclass(frozen=True)
+class ModelFit:
+    parameterization: Parameterization
+    n_obs: int
+    fit: CmdStanMCMC
+
+PARAMETERIZATIONS = (
+    Parameterization(
+        label="centered",
+        model=funnel_cp,
+        sampled_x="theta[1]",
+    ),
+    Parameterization(
+        label="non-centered",
+        model=funnel_ncp,
+        sampled_x="theta_raw[1]",
+    ),
+)
+```
+
+We fit every model to every dataset via two nested loops:  the outer loop is by model,
+centered parameterization first, then non-centered parameterization.
+The inner loop by dataset from smallest to largest.
+CmdStanPy produces a series of logging messages consisting of start/finish messages interleaved with
+messages reporting divergences per chain and transient error messages from the sampler.
+
+```{python}
+#| output: false
+
+def fit_dataset(
+    parameterization: Parameterization,
+    dataset: dict[str, object],
+    seed: int,
+) -> CmdStanMCMC:
+    """Fit one parameterization to one Stan dataset."""
+    return parameterization.model.sample(
+        data=dataset,
+        seed=seed,
+        show_progress=False,
+    )
+
+fits: list[ModelFit] = []
+
+for parameterization in PARAMETERIZATIONS:
+    for n_obs in N_OBS:
+        fit = fit_dataset(
+            parameterization=parameterization,
+            dataset=datasets[n_obs],
+            seed=12345 + n_obs,
+        )
+        fits.append(
+            ModelFit(
+                parameterization=parameterization,
+                n_obs=n_obs,
+                fit=fit,
+            )
+        )
+```
+
+The first few fits were the centered parameterization running on small datasets;
+these runs resulted in some divergences.  The last few fits were from the non-centered parameterization
+running on large datasets; a few computations raised errors.
+The following table shows the divergences per run.
+
+```{python}
+def divergence_summary(fits: Sequence[ModelFit]) -> pd.DataFrame:
+    """Return one row of divergence diagnostics per fitted model."""
+    rows: list[dict[str, object]] = []
+
+    for result in fits:
+        divergent = result.fit.method_variables()["divergent__"]
+        rows.append(
+            {
+                "parameterization": result.parameterization.label,
+                "N": result.n_obs,
+                "draws": divergent.size,
+                "divergent": divergent.sum(),
+                "percent divergent": 100 * divergent.mean(),
+            }
+        )
+
+    summary = pd.DataFrame(rows)
+    parameterization_order = list(
+        dict.fromkeys(result.parameterization.label for result in fits)
+    )
+    summary["parameterization"] = pd.Categorical(
+        summary["parameterization"],
+        categories=parameterization_order,
+        ordered=True,
+    )
+    return summary.sort_values(["parameterization", "N"], ignore_index=True)
+
+divergence_summary(fits)
+```
+
+For very small amounts of data - 2 or 4 observations per group - the centered parameterization
+had divergences.  Note, however, there were fewer divergences than when we fit the prior-only model in the previous section,
+and as the amount of data increased, there were no divergences.
+
+Again, we plot the space the sampler moves in:
+parameters `theta[1]` and `log_sigma_sq` for the centered parameterization and
+and `theta_raw[1]` against `log_sigma_sq` for the non-centered parameterization.
+To visualize all 16 fits, we divide fits by data regime:  the low data regime: $2, 4, 8, 16$
+observations per group, and the high-data regime: $64, 256, 2048, 32768$ observations per group.
+
+```{python}
+def draws_xy(
+    fit: CmdStanMCMC, x_variable: str, y_variable: str
+) -> pd.DataFrame:
+    """Extract two variables and the divergence indicator from a fit."""
+    draws = fit.draws_pd()
+    return pd.DataFrame(
+        {
+            "x": draws[x_variable].to_numpy(),
+            "y": draws[y_variable].to_numpy(),
+            "divergent": draws["divergent__"].to_numpy() > 0,
+        }
+    )
+
+def facet_frame(
+    fits: Sequence[ModelFit],
+    n_obs_values: Sequence[int],
+    y_variable: str = "log_sigma_sq",
+) -> pd.DataFrame:
+    """Stack selected fits into a tidy frame for faceted plotting."""
+    requested_sizes = set(n_obs_values)
+    selected_fits = [result for result in fits if result.n_obs in requested_sizes]
+
+    frames = []
+    for result in selected_fits:
+        parameterization = result.parameterization
+        facet_label = f"{parameterization.label}: {parameterization.sampled_x}"
+        frames.append(
+            draws_xy(
+                result.fit,
+                x_variable=parameterization.sampled_x,
+                y_variable=y_variable,
+            ).assign(
+                parameterization=facet_label,
+                N=f"N = {result.n_obs}",
+            )
+        )
+
+    frame = pd.concat(frames, ignore_index=True)
+    parameterization_order = list(
+        dict.fromkeys(
+            f"{result.parameterization.label}: {result.parameterization.sampled_x}"
+            for result in fits
+        )
+    )
+    frame["parameterization"] = pd.Categorical(
+        frame["parameterization"],
+        categories=parameterization_order,
+        ordered=True,
+    )
+    frame["N"] = pd.Categorical(
+        frame["N"],
+        categories=[f"N = {n_obs}" for n_obs in n_obs_values],
+        ordered=True,
+    )
+    return frame
+
+def plot_divergence_grid(
+    data: pd.DataFrame,
+    title: str,
+    subtitle: str = "Divergent transitions in red",
+    figure_size: tuple[float, float] = (8.0, 6.0),
+    coords: p9.coord_cartesian | None = None,
+) -> p9.ggplot:
+    """Plot sampler coordinates using fixed grid size."""
+    nondivergent = data[~data["divergent"]]
+    divergent = data[data["divergent"]]
+    if coords is None:
+      coords = p9.coord_cartesian(xlim=(-10, 10), ylim=(-10, 10))
+
+    return (
+        p9.ggplot(data, p9.aes(x="x", y="y"))
+        + p9.geom_point(
+            data=nondivergent, color="#333333", alpha=0.4, size=0.7
+        )
+        + p9.geom_point(data=divergent, color="red", alpha=0.8, size=0.7)
+
+        + p9.facet_grid(
+          rows="parameterization",
+          cols="N",
+          scales="fixed",
+          )
+        + coords
+        + p9.labs(
+            x="group 1 parameter",
+            y="log_sigma_sq",
+            title=title,
+            subtitle=subtitle,
+        )
+        + p9.theme_minimal()
+        + p9.theme(figure_size=figure_size)
+    )
+```
+
+```{python}
+print(f'data generating parameter theta[1]: {theta_true[0]}')
+```
+
+```{python}
+LOW_DATA_N = N_OBS[:4]
+
+low_data_plot = plot_divergence_grid(
+    facet_frame(fits, LOW_DATA_N),
+    title="Low data regime: group[1] parameter against population scale",
+    coords = p9.coord_cartesian(xlim=(-4, 8), ylim=(-12, 6))
+)
+low_data_plot
+```
+
+```{python}
+HIGH_DATA_N = N_OBS[4:]
+high_data_plot = plot_divergence_grid(
+    facet_frame(fits, HIGH_DATA_N),
+    title="High data regime: sampler parameter against population scale",
+    coords = p9.coord_cartesian(xlim=(-3, 3), ylim=(-3, 3))
+)
+high_data_plot
+```
 
 
-  
+
+
+
+
+
+
 
 
 
