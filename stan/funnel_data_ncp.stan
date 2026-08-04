@@ -3,15 +3,15 @@ data {
   array[9] int<lower=0, upper=N> y;  // count successes
 }
 parameters {
-  real<lower=0> sigma;
+  real log_sigma_sq;
   vector[9] theta_raw;
 }
 transformed parameters {
   vector[9] theta;                     // log odds success
-  theta = sigma * theta_raw;
+  theta = exp(log_sigma_sq/2) * theta_raw;
 }
 model {
-  sigma ~ normal(0, 3);
+  log_sigma_sq ~ normal(0, 3);
   theta_raw ~ std_normal();
   y ~ binomial_logit(N, theta);
 }

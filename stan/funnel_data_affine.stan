@@ -8,6 +8,6 @@ parameters {
 }
 model {
   sigma ~ normal(0, 3);
-  theta ~ normal(0, sigma);
+  theta ~ normal(0, exp(sigma/2));
   y ~ binomial_logit(N, theta);
 }
