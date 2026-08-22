@@ -92,42 +92,49 @@ p9.options.dpi = 100
 np.set_printoptions(precision=3)
 ```
 
-## Overview
-
-This case study revisits the question of how to parameterize a hierarchical model
-in order to improve the computational performance of an Markov chain Monte Carlo (MCMC) sampler,
-in particular, the No-U-Turn Sampler for Hamiltonian Monte Carlo (NUTS-HMC) sampler used in Stan.
+## OverviewThis case study revisits the question of how to parameterize a hierarchical model
+in order to improve the computational performance of 
+the No-U-Turn Sampler for Hamiltonian Monte Carlo (NUTS-HMC) sampler used in Stan.
 This is discussed in the [Stan User's Guide](https://mc-stan.org/docs/stan-users-guide/) chapter "Efficiency Tuning",
 section [reparameterization](https://mc-stan.org/docs/stan-users-guide/efficiency-tuning.html#funnel.figure),
-and at greater length in @Betancourt-Girolami:2013 and @papa-et-al:2007.
-This case study expands on that example and provides further examples of reparameterizations.
+and at greater length in @Betancourt-Girolami:2013, "Hamiltonian Monte Carlo for Hierarchical Models"
+and @papa-et-al:2007, "A General Framework for the Parametrization of Hierarchical Models".
+The Stan User's Guide and numerous case studies and examples show how to rewrite
+a model, usually going from the centered to non-centered parameterization.
+The goal of this case study is to further explain when
+this reparameterization is available, when it is helpful, and why.
+
 
 ## Hierarchical models and MCMC samplers
 
 A Bayesian model with $N$ parameters defines a probability density over a $N$-dimensional parameter space.
-There are many names for hierarchical models and their components.
-Here we follow the terminology of @Betancourt-Girolami:2013.
-At the left is Figure 1 from that paper which shows the structure of a simple hierarchical model
+The diagram at the left (Figure 1 of Betancourt and Girolami)
+shows the structure of a simple hierarchical model
 where each data item consists of both an observed value and a membership id for the group it belongs to.
-This example consists of a single population-level parameter $\phi$ and $\mathrm{N}$ local parameters ${\theta}_1, ... {\theta}_{\mathrm{N}}$,
-The local parameters draw common information from the global parameter,
-thus allowing for partial pooling of information across groups.
+This example model has a single population-level parameter $\phi$
+and $\mathrm{N}$ local parameters ${\theta}_1, ... {\theta}_{\mathrm{N}}$.
+The local parameters draw common information from the global parameter
+and this structure allows for partial pooling of information across groups.
    
 ::: {.column-margin}
 ![Hierarchical model structure](img/betancourt_girolami_fig1.png)
 :::
 
+::: {.column-margin}
+There are many names for hierarchical models and their components,
+see [All the names for hierarchical and multilevel modeling](https://statmodeling.stat.columbia.edu/2019/09/18/all-the-names-for-hierarchical-and-multilevel-modeling/).
+:::
+
 MCMC algorithms generate samples from the posterior distribution
 and the sampler efficiency depends on the geometric properties of this distribution.
 The posterior distribution is the conditional distribution of the parameters given the data.
-Thus, the interaction of the parameters and the data
-determine the geometry of the posterior,
-and they do so according to Bayes's theorem:
+The interaction of the parameters and the data
+determine the geometry of the posterior according to Bayes's theorem:
 
 \begin{align}
 \underbrace{p(\textrm{params} \mid \textrm{data})}_{\textrm{posterior}}
 &\propto
-\underbrace{p(\textrm{data} \mid \textrm{params})}_{\textrm{data model}}
+\underbrace{p(\textrm{data} \mid \textrm{params})}_{\textrm{data distribution}}
 \cdot
 \underbrace{p(\textrm{params})}_{\textrm{prior}}
 \\[4pt]
@@ -135,15 +142,18 @@ and they do so according to Bayes's theorem:
 
 ::: {.column-margin}
 Here we follow @Bayesian-Workflow:2026, section 5.4.
-The data model is often termed the *likelihood* as a function of $\theta$ when the data is fixed
+The data distribution is often termed the *likelihood* as a function of $\theta$ when the data is fixed
 and the *sampling distribution* as a distribution over $y$ when $\theta$ is fixed.
 :::
 
 In the absence of data, the posterior distribution is the prior distribution.
-When analyzing $n$ data points, the prior comes in once
-and the data model enters the posterior $n$ times.
-Thus both the data model and the amount of data determine how
+The data distribution, and the amount and quality of the data determine how
 the geometry of the posterior density evolves from the prior.
+If there is relatively little difference between the shape of the prior and the posterior
+then reparameterizations of the priors in a model will directly affect the shape of the posterior density.
+The goal is to choose a parameterization which results in a posterior geometry that the
+NUTS-HMC can efficiently sample from.
+
 
 ### Stan's NUTS-HMC algorithm
 
@@ -197,8 +207,9 @@ $$
 $$
 
 where $M$ is a positive definite mass matrix.  The mass matrix
-functions as a metric and is equivalent to having a linear
-preconditioner; see @Betancourt:2017 for details.
+functions as a metric and is equivalent to having a **linear preconditioner**.
+It is *linear* because the same function is applied everywhere across the posterior.
+It is a *preconditioner* because it rescales each dimension so that a single step size can be used in every direction.
 
 Stan estimates a mass matrix during warmup using the covariance of the
 warmup draws.  The mass matrix will be set to the inverse of the
@@ -235,6 +246,7 @@ The NUTS-HMC sampler sets an upper bound on the number of steps, at $2^{\mathrm{
 With a small step size, during sampling every trajectory makes almost no progress before hitting this upper bound.
 Not only does the sampler fail to properly explore the posterior, it fails very slowly.
 
+
 ## Visualization: easy and difficult target densities
 
 An easy target density for HMC is a Gaussian: its Hessian is the same at every point.
@@ -250,43 +262,45 @@ $$
 p(y,x) = \textsf{normal}(y \mid 0,3) \times \prod_{n=1}^9
 \textsf{normal}(x_n \mid 0,\exp(y/2)).
 $$
-
+The funnel distribution is hierarchical; the scale of the local parameters $x_1 \ldots x_9$ depends on the global parameter $y$.
 An isotropic Gaussian on the same space would have density
 
 $$
 p(y,x) = \textsf{normal}(y \mid 0,1) \times \prod_{n=1}^9 \textsf{normal}(x_n \mid 0,1).
 $$
-
-Both distributions are defined on the same space.
-The funnel distribution is hierarchical; the scale of the elements of $x$ depends on the global parameter $y$.
 The isotropic Gaussian is merely the product of ten normal distributions.
-Below we show the contour plots on the log scale for $x[1], y$ of the density for each.
+
+Both distributions are defined on the same space, $\mathbb{R}^{10}$.
+Below we show the contour plots on the log scale for $x_1, y$ of the density for each.
 
 ![Easy and hard density plots](plots/easy_vs_hard.png)
 
 The isotropic Gaussian contours are spherical.
-The probability contours of the funnel are shaped like ten-dimensional funnels (hence the name).  The
-funnel's neck is particularly sharp because of the exponential function applied to $y$.
+The probability contours of the funnel are shaped like ten-dimensional funnels (hence the name).
+The funnel's neck is particularly sharp because of the exponential function applied to $y$.
 
 ## Centered and non-centered parameterizations
 
-We write the Stan model corresponding to Neal's funnel.   The natural encoding in Stan is called the "centered parameterization".
+The Stan model which corresponds directly to Neal's funnel in that 
+local parameters `x` are defined in terms of the hierarhical parameters `y`
+is called the "centered parameterization".
 
 ```{.stan include="stan/funnel_priors_cp.stan"}
 ```
 
-The non-centered parameterization shifts the correlation from the parameters to auxiliary variables
-declared in the `transformed parameters` block.
+The hierarchical dependence between `x` and `y` can be read off the model in the natural way, i.e., the way that corresponds to the mathematical formula above:  $\textsf{normal}(x_n \mid 0,\exp(y/2))$.
+
+The non-centered parameterization of Neal's funnel shifts the correlation from the model parameters
+to auxiliary variables declared in the `transformed parameters` block.
 
 ```{.stan include="stan/funnel_priors_ncp.stan"}
 ```
 
-The non-centered version samples two standard normal variables and
-builds `y` and `x` from them by scaling: `y = 3 * y_raw`
-stretches a unit normal to scale `3`,
-and `x = exp(y/2) * x_raw` stretches a unit normal to scale `exp(y/2)`.
-The declared parameters are now `y_raw` and `x_raw`,
-whose distribution is a fixed isotropic Gaussian.
+The declared parameters are now `y_std` and `x_std`, whose distribution is a fixed isotropic Gaussian
+which is the ideal posterior density for the NUTS-HMC sampler.
+Given a draw with values for `y_std` and `x_std` the model block then builds transformed variables `y` and `x`.
+The statement `y = 3 * y_std` stretches a unit normal to scale `3`
+and statement `x = exp(y/2) * x_std` stretches a unit normal to scale `exp(y/2)`.
 All of the dependence between the scale of `x` and the value of `y`
 has been moved into the deterministic transform.
 The target distribution over $(y, x)$ is unchanged;
@@ -330,11 +344,11 @@ cp_summary.loc[['y'], ['Mean', 'StdDev', 'ESS_bulk', 'ESS_bulk/s', 'R_hat']]
 ```
 
 The non-centered parametrization does quite well.
-Note that both `y` and `y_raw` have identical ESS_bulk; this is because
+Note that both `y` and `y_std` have identical ESS_bulk; this is because
 the non-centered transform is a deterministic rescaling of `y`.
 
 ```{python}
-ncp_summary.loc[['y', 'y_raw'], ['Mean', 'StdDev', 'ESS_bulk', 'ESS_bulk/s', 'R_hat']]
+ncp_summary.loc[['y', 'y_std'], ['Mean', 'StdDev', 'ESS_bulk', 'ESS_bulk/s', 'R_hat']]
 ```
 
 Note the difference in `ESS_bulk/s`:  this is quantity `ESS_bulk` divided by
@@ -351,10 +365,10 @@ funnel_plot_cp = plot_divergences(fit=funnel_priors_cp_fit,
                                   subtitle='target distribution - parameters x[1], y')
 
 funnel_plot_ncp_params = plot_divergences(fit=funnel_priors_ncp_fit, 
-                                  x_var='x_raw[1]', 
-                                  y_var='y_raw', 
+                                  x_var='x_std[1]', 
+                                  y_var='y_std', 
                                   title='Neal\'s funnel non-centered parameterization',
-                                  subtitle='target distribution - parameters x_raw[1], y_raw')
+                                  subtitle='target distribution - parameters x_std[1], y_std')
 
 funnel_plot_ncp_xforms = plot_divergences(fit=funnel_priors_ncp_fit, 
                                   x_var='x[1]', 
@@ -364,7 +378,7 @@ funnel_plot_ncp_xforms = plot_divergences(fit=funnel_priors_ncp_fit,
 ```
 
 First we show the space the sampler actually moves in:
-`x_raw[1]` and `y_raw` for the non-centered parameterization (left)
+`x_std[1]` and `y_std` for the non-centered parameterization (left)
 and parameters `x[1]` and `y` for the centered parameterization (right).
 The sampler sees the isotropic Gaussian in the non-centered version
 and the funnel in the centered one, matching the analytic plots from the previous section.
@@ -409,12 +423,15 @@ However, the posterior is proportional to the prior times the data model:
 $$
 p(\theta \mid y) \propto p(\theta) \, p(y \mid \theta)
 $$
-The data contributes its own geometry, and with enough data it, not the prior,
-determines the shape the sampler sees.
+The data distribution contributes its own geometry.
+At the point where the contribution of the data distribution swamps that of the prior,
+this determines the shape of the posterior density that the sampler must navigate.
+(For more discussion see Andrew Gelman's memorable blog post
+[Don't strain at the gnat of prior while swallowing the camel of the likelihood](andrewgelman.com).)
 
 
-To see how this works, we add the data model to these Stan programs 
-to define a simple hierarchical logistic regression.
+To see how this works, we add a data distribution statement and corersponding data definitions
+to these Stan programs for simple hierarchical logistic regression model.
 For fixed number of groups (9) and a specified number of binary trials ('N'),
 we record the number of successful outcomes for each group.
 
@@ -453,11 +470,10 @@ The corresponding non-centered model follows the example in the
 ```{.stan include="stan/funnel_data_ncp.stan"}
 ```
 
-
 These alternative parameterizations should produce
 exactly the same posterior estimates for all parameters;
-and given sufficient computing time, the HMC sampler should do so.
-But we have a fixed compute budget and/or limited time.
+and given sufficient compute time, the HMC sampler will (probably) do so.
+But we have a limited time.
 The question becomes, which parameterization is most efficient in which data regime?
 To explore the problem, we generate datasets of different sizes and then fit them
 using both the centered and non-centered parameterizations and compare the resulting samples.
@@ -493,12 +509,18 @@ simulation = datagen.sample(
     iter_sampling=1,
     adapt_engaged=False,
     show_progress=False,
-    seed=12345,
+    seed=424242
 )
 
 theta_true = simulation.stan_variable("theta")[0]
 trials = simulation.stan_variable("y")[0].astype(int)
+// TODO: we can get log_sigma_sq from summary stats of stan_variable theta, right?
 ```
+
+::: {.column-margin}
+We use a fixed random seed for reproducibility; remove this to generate datasets with a different
+values of local parameter `x`.
+:::
 
 Next we create the nested datasets.
 ```{python}
@@ -539,7 +561,7 @@ funnel_ncp = CmdStanModel(stan_file=funnel_ncp_stan)
 ```
 
 We fit both models on the eight nested datasets.
-To organize this work, we create a two helper classes
+To organize this work, we create two helper classes
 that index the models, the parameters of interest, and the returned samples.
 ```{python}
 @dataclass(frozen=True)
@@ -547,6 +569,7 @@ class Parameterization:
     label: str
     model: CmdStanModel
     sampled_x: str
+    sampled_y: str
 
 @dataclass(frozen=True)
 class ModelFit:
@@ -559,11 +582,13 @@ PARAMETERIZATIONS = (
         label="centered",
         model=funnel_cp,
         sampled_x="theta[1]",
+        sampled_y="log_sigma_sq",
     ),
     Parameterization(
         label="non-centered",
         model=funnel_ncp,
-        sampled_x="theta_raw[1]",
+        sampled_x="theta_std[1]",
+        sampled_y="log_sigma_sq",
     ),
 )
 ```
@@ -643,15 +668,12 @@ def divergence_summary(fits: Sequence[ModelFit]) -> pd.DataFrame:
 divergence_summary(fits)
 ```
 
-For very small amounts of data - 2 or 4 observations per group - the centered parameterization
-had divergences.  Note, however, there were fewer divergences than when we fit the prior-only model in the previous section,
-and as the amount of data increased, there were no divergences.
+For small amounts of observations per group the centered parameterization had divergences,
+however, there were fewer divergences than the $46$ total divergences across all chains
+that we saw when we fit the prior-only model in the previous section.
+For the largest dataset, the non-centered parameterization had 1 divergence.
 
-Again, we plot the space the sampler moves in:
-parameters `theta[1]` and `log_sigma_sq` for the centered parameterization and
-and `theta_raw[1]` against `log_sigma_sq` for the non-centered parameterization.
-To visualize all 16 fits, we divide fits by data regime:  the low data regime: $2, 4, 8, 16$
-observations per group, and the high-data regime: $64, 256, 2048, 32768$ observations per group.
+
 
 ```{python}
 def draws_xy(
@@ -748,8 +770,22 @@ def plot_divergence_grid(
 ```
 
 ```{python}
+print(f'data generating parameter log_sigma_sq: {theta_true[0]}')
 print(f'data generating parameter theta[1]: {theta_true[0]}')
 ```
+
+Again, we plot the space the sampler moves in:
+parameters `theta[1]` and `log_sigma_sq` for the centered parameterization and
+and `theta_std[1]` against `log_sigma_sq` for the non-centered parameterization.
+To visualize all 16 fits, we divide fits by data regime:  the low data regime: $2, 4, 8, 16$
+observations per group, and the high-data regime: $64, 256, 2048, 32768$ observations per group.
+
+The low data regime plots are all plotted on the same scale:
+the x-axis ranges from $(-4, 8)$ and the y-axis ranges from $(-12, 6)$.
+In the low data regime, the centered parameterization plots are still all funnel shaped;
+the non-centered parameterization plots are not spherical; of these, the very low data regime plot
+is most symmetric-looking and the non-centered parameterization explores more of the posterior than
+its centered counterpart.
 
 ```{python}
 LOW_DATA_N = N_OBS[:4]
@@ -762,23 +798,129 @@ low_data_plot = plot_divergence_grid(
 low_data_plot
 ```
 
+With more data, the sampler is able to get a tighter estimate on estimates of both `theta` and `log_sigma_sq`.
+The high data regime plots are plotted with x-axis range $(-3, 3)$ and the y-axis range from $(-4, 2)$,
+(cf x-axis $(-4, 8)$, and y-axis $(-12, 6)$).
+The values of `theta` were generated `std_normal_rng()`, thus we expect `log_sigma_sq` to be roughly
+centered on zero.
+The true value of `theta[1]` is $1.05$.
+As the amount of data per group increases, the centered parameterization hones in on this value,
+but shows a spread on the vertical axis due to uncertainty about the population-level variance.
+The non-centered parameterization begins to show a pathology called the "inverse funnel".
+
+
 ```{python}
 HIGH_DATA_N = N_OBS[4:]
 high_data_plot = plot_divergence_grid(
     facet_frame(fits, HIGH_DATA_N),
     title="High data regime: sampler parameter against population scale",
-    coords = p9.coord_cartesian(xlim=(-3, 3), ylim=(-3, 3))
+    coords = p9.coord_cartesian(xlim=(-3, 3), ylim=(-4, 2))
 )
 high_data_plot
 ```
 
+TODO:  get timing information; ESS/s
 
+```python
+def ess_sec_summary(fits: Sequence[ModelFit]) -> pd.DataFrame:
+    """Return one row of ESS/sec diagnostics per fitted model."""
+    rows: list[dict[str, object]] = []
+// ******** need to run summary?  get ESS/sec 
+    for result in fits:
+    	// ********  stopped here
+        ess_sec = result.fit.method_variables()["divergent__"]
+        rows.append(
+            {
+                "parameterization": result.parameterization.label,
+                "N": result.n_obs,
+                "draws": divergent.size,
+                "divergent": divergent.sum(),
+                "percent divergent": 100 * divergent.mean(),
+            }
+        )
 
+    summary = pd.DataFrame(rows)
+    parameterization_order = list(
+        dict.fromkeys(result.parameterization.label for result in fits)
+    )
+    summary["parameterization"] = pd.Categorical(
+        summary["parameterization"],
+        categories=parameterization_order,
+        ordered=True,
+    )
+    return summary.sort_values(["parameterization", "N"], ignore_index=True)
 
+ess_sec_summary(fits)
+```
 
+## Compatible Parameterizations
 
+In the previous section we added a data model to the pair of hierarchical priors;
+resulting in a simple logistic regression model for binary data.
+This dataset could equally well be fit using a Beta-Binomial model.
+This is the first model presented in Bob Carpenter's most execllent introdution
+to hierarchical models in Stan
+[Pooling with Hierarchical Models for Repeated Binary Trials](https://mc-stan.org/learn-stan/case-studies/pool-binary-trials.html)
 
+In this case study, the dataset consists of 45 observations of at-bats for 18 major-league baseball players
+in the first several weeks of the 1970 baseball season with the goals of estimating both the
+population-level parameter representing the expected batting ability of a new MLB player as well as
+estimating the individual-level abilities of the 18 players in the dataset.
+The first section of this case study lays out the hierarchical model:
 
+:::{.callout-note appearance="minimal" icon=false style="border-left-color: #d3d3d3;"}
+
+* MLB Players belong to a population of players
+
+* The hierarchical model estimates the population properties jointly with the player abilities
+  + the more variable the population estimate, the less pooling and vice versa.
+
+* Place a prior on the player ability $\theta$,  the probability of getting a hit in an at-bat
+  + $\theta$ is a probability (range $0, 1$)
+  + the prior which matches this range is a Beta distribution
+
+* Parameterize the Beta distribution in terms of the population mean $\phi$ and concentration $\kappa$.
+  + $\phi$ determines the center of the distribution
+  + $\kappa$ determines how tightly values are concentrated around $\phi$ - the higher $\kappa$, the less variation in individual player abilities.
+:::
+
+The Stan implementation of this parameterization of the Beta-Binomial model is this:
+
+\fontsize{9pt}{9.4}\selectfont
+```stan
+data {
+  int<lower=0> N; // players
+  array[N] int<lower=0> K; // at-bats
+  array[N] int<lower=0> y; // hits
+}
+parameters {
+  real<lower=0, upper=1> phi; // population chance of success
+  real<lower=1> kappa; // population concentration
+  vector<lower=0, upper=1>[N] theta;  // batting ability
+}
+model {
+  kappa ~ pareto(1, 1.5); // hyperprior
+  theta ~ beta(phi * kappa, (1 - phi) * kappa);  // prior
+  y ~ binomial(K, theta);
+}
+generated quantities {
+  vector[N] batting_average = 1000 * theta;
+}
+```
+\normalsize
+
+As this is a hierarchical model, with the canonical dependence between the population-level parameters `phi`and `kappa`
+and the local-level parameter `theta` - the chance of success for an single at-bat -
+and as 45 observations per player put this dataset squarely in the low-data regime,
+the NUTS-HMC sampler struggles to fit the model on th data and the HMC diagnostics show that the model fails to converge properly.
+
+The next section of the baseball batting ability case study shows how the logistic regression model -
+estimating a player's log-odds chance of success for one at-bat -
+can be used to estimate both individual player abilitity and population-level player ability.
+And in the following sections, this case study presents an excellent and thorough discussion of the non-centered parameterization.
+
+The pedegogical progression - from beta-binomial to logistic regression - is necessary in order to
+set up the non-centered parameterization.
 
 
 
