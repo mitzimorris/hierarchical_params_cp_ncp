@@ -22,7 +22,6 @@ format:
     embed-resources: true
     html-math-method: mathjax
 bibliography: references.bib
-reference-location: margin
 include-in-header:
   - text: |
       <style>
@@ -92,24 +91,35 @@ p9.options.dpi = 100
 np.set_printoptions(precision=3)
 ```
 
-## OverviewThis case study revisits the question of how to parameterize a hierarchical model
-in order to improve the computational performance of 
-the No-U-Turn Sampler for Hamiltonian Monte Carlo (NUTS-HMC) sampler used in Stan.
-This is discussed in the [Stan User's Guide](https://mc-stan.org/docs/stan-users-guide/) chapter "Efficiency Tuning",
+## Overview
+
+The goal of this case study is to help users who wish to build, extend, or simply use
+multi-level Stan models understand what the centered and non-centered parameterizations are,
+why the choice of parameterizations matters for MCMC methods, and
+how to recognize situations where switching from one to the other may improve
+sampling efficiency and the inference accuracy.
+
+There are many exellent presentations on the centered and non-centered parameterization already.
+It is discussed in the [Stan User's Guide](https://mc-stan.org/docs/stan-users-guide/) chapter "Efficiency Tuning",
 section [reparameterization](https://mc-stan.org/docs/stan-users-guide/efficiency-tuning.html#funnel.figure),
 and at greater length in @Betancourt-Girolami:2013, "Hamiltonian Monte Carlo for Hierarchical Models"
 and @papa-et-al:2007, "A General Framework for the Parametrization of Hierarchical Models".
 The Stan User's Guide and numerous case studies and examples show how to rewrite
 a model, usually going from the centered to non-centered parameterization.
-The goal of this case study is to further explain when
-this reparameterization is available, when it is helpful, and why.
+Each of these assumes a certain amount of background knowledge.
+This case study connects the dots between these disucssions
+with the goal of helping the applied statistician or analyst
+develop and trouble-shoot multi-level models for their data.
 
 
 ## Hierarchical models and MCMC samplers
 
 A Bayesian model with $N$ parameters defines a probability density over a $N$-dimensional parameter space.
 The diagram at the left (Figure 1 of Betancourt and Girolami)
-shows the structure of a simple hierarchical model
+shows the structure of a simple hierarchical model^[
+There are many names for hierarchical models and their components,
+see [All the names for hierarchical and multilevel modeling](https://statmodeling.stat.columbia.edu/2019/09/18/all-the-names-for-hierarchical-and-multilevel-modeling/).
+]
 where each data item consists of both an observed value and a membership id for the group it belongs to.
 This example model has a single population-level parameter $\phi$
 and $\mathrm{N}$ local parameters ${\theta}_1, ... {\theta}_{\mathrm{N}}$.
@@ -118,11 +128,6 @@ and this structure allows for partial pooling of information across groups.
    
 ::: {.column-margin}
 ![Hierarchical model structure](img/betancourt_girolami_fig1.png)
-:::
-
-::: {.column-margin}
-There are many names for hierarchical models and their components,
-see [All the names for hierarchical and multilevel modeling](https://statmodeling.stat.columbia.edu/2019/09/18/all-the-names-for-hierarchical-and-multilevel-modeling/).
 :::
 
 MCMC algorithms generate samples from the posterior distribution
@@ -142,23 +147,25 @@ determine the geometry of the posterior according to Bayes's theorem:
 
 ::: {.column-margin}
 Here we follow @Bayesian-Workflow:2026, section 5.4.
-The data distribution is often termed the *likelihood* as a function of $\theta$ when the data is fixed
-and the *sampling distribution* as a distribution over $y$ when $\theta$ is fixed.
+The data distribution is the *likelihood* when viewed as a function of $\theta$ given fixed data $y$
+and the *sampling distribution* when viewed as a distribution over $y$ for a fixed value $\theta$.
 :::
 
 In the absence of data, the posterior distribution is the prior distribution.
-The data distribution, and the amount and quality of the data determine how
-the geometry of the posterior density evolves from the prior.
+The posterior density evolves from the prior according to the data distribution
+and the amount and quality of the data.
 If there is relatively little difference between the shape of the prior and the posterior
-then reparameterizations of the priors in a model will directly affect the shape of the posterior density.
-The goal is to choose a parameterization which results in a posterior geometry that the
-NUTS-HMC can efficiently sample from.
+then reparameterizations of the priors in a model will directly affect the shape of the posterior density,
+which in turn, determines the efficiency of the NUTS-HMC sampler.
 
 
 ### Stan's NUTS-HMC algorithm
 
 A general understanding of the HMC algorithm is needed in order to
-understand why the parameterization of hierarchical models is challenging for HMC.
+understand why the parameterization of hierarchical models is challenging for HMC.^[
+The parameterization of hierarchical models is challenging for Gibbs samplers as well
+but for different reasons which are discussed in @papa-et-al:2007.
+]
 The HMC algorithm works with three related quantities.
 
 * *Posterior density*: the probability per unit volume near a point (because any given point has zero probability).
@@ -209,7 +216,7 @@ $$
 where $M$ is a positive definite mass matrix.  The mass matrix
 functions as a metric and is equivalent to having a **linear preconditioner**.
 It is *linear* because the same function is applied everywhere across the posterior.
-It is a *preconditioner* because it rescales each dimension so that a single step size can be used in every direction.
+It is a *preconditioner* because it rescales each dimension so that a single step size can be used for all dimensions.
 
 Stan estimates a mass matrix during warmup using the covariance of the
 warmup draws.  The mass matrix will be set to the inverse of the
@@ -228,7 +235,9 @@ The optimal step size is small enough to accurately follow the Hamiltonian flow
 and no smaller since the smaller the step size, the more steps are needed to complete the trajectory
 and the greater the computational cost.
 The number of steps $L$ is determined dynamically for each iteration according to the "No-U-Turn" algorithm
-introduced in @Hoffman-Gelman:2014 and refined in @Betancourt:2017.
+introduced in @Hoffman-Gelman:2014 and refined in @Betancourt:2017.^[
+Appendix A of @Betancourt:2017 describe the algorithm in the current Stan NUTS-HMC implementation.
+]
 
 If the posterior is (approximately) multivariate normal (Gaussian)
 then the mass matrix is a linear map that transforms it
@@ -306,58 +315,91 @@ has been moved into the deterministic transform.
 The target distribution over $(y, x)$ is unchanged;
 what changes is the coordinate system the sampler moves in.
 
-We run both models to get a sample from the target distribution.
-First we run the centered parameterization.
+As written, these models are priors-only models;
+there are no data variables and therefore no data distribution statements.
+Running these modesl produces a set of draws from the prior density.
+To evaluate how easy or challenging the respective densities are for the NUTS-HMC sampler
+we run 100 fits, using the same sequence of seeds.^[
+This insures that each run starts from the identical initial point.
+]
+We use the CmdStan defaults:  4 chains per run, 1000 each warmup and sampling iteration.
+For every fit we record the total number of divergent transitions across all four chains,
+the number of chains that had at least one divergence, and CmdStan's elapsed warmup and
+sampling times.  For `y` and `x[1]` we also record `ESS_bulk/s` and $\hat R$,
+both the median and worst values (lowest `ESS_bulk/s` and highest $\hat R$).
+
+::: {.column-margin}
+$\hat R$ is a measure of convergence; if it is greater than $1.01$ the sampler did not
+properly converge during warmup and all other estimates should be ignored.
+Each fit returns 4000 draws, but we must account for autocorrelated draws.
+$N_{eff}$ is the number of independent samples with the same estimation power\
+as the $N$ autocorrelated samples.
+`ESS_bulk/s` compares $N_{eff}$ per second; higher `ESS_bulk/s` is better
+(provided that $\hat R$ is acceptable).
+:::
 
 ```{python}
-# centered parameterization:  compile, run, get sample, create plot
-funnel_priors_cp_stan = os.path.join('stan', 'funnel_priors_cp.stan')
-funnel_priors_cp = CmdStanModel(stan_file=funnel_priors_cp_stan)
-funnel_priors_cp_fit = funnel_priors_cp.sample(seed=4242, show_progress=False)
-cp_summary = funnel_priors_cp_fit.summary(sig_figs=3)
-```
-The centered parameterization produces a difficult target density; the sampler almost always reports several divergences.
-The random seed used here produces many divergences for chain 4.
-
-Then we run the non-centered parameterization, using the same random seed.
-This produces no divergences.
-```{python}
-# non-centered parameterization:  compile, run, get sample, create plots
-funnel_priors_ncp_stan = os.path.join('stan', 'funnel_priors_ncp.stan')
-funnel_priors_ncp = CmdStanModel(stan_file=funnel_priors_ncp_stan)
-funnel_priors_ncp_fit = funnel_priors_ncp.sample(seed=4242, show_progress=False)
-ncp_summary = funnel_priors_ncp_fit.summary(sig_figs=3)
+# use saved output from python program:  scripts/run_prior_fits.py
+prior_fit_summary = pd.read_csv(os.path.join("results", "cp_ncp_prior_fits.csv"))
+prior_run_summary = prior_fit_summary.drop_duplicates("Parameterization")
+prior_run_summary[
+    [
+        "Parameterization",
+        "Runs",
+        "Runs with a divergence",
+        "Average total divergences",
+        "Average affected chains",
+        "Average warmup seconds",
+        "Average sampling seconds",
+    ]
+].set_index("Parameterization").round(2)
 ```
 
-The model specifies that `y` should has mean $0$ and standard deviation of $3$.
-We report the model fits for the mean, standard deviation, along with the diagnostics `ESS_bulk` and `R_hat`.
-The [$\hat{R}$ statistic ](https://mc-stan.org/docs/reference-manual/analysis.html#potential-scale-reduction) measures convergence.
-The general recommendation is that this should be less than $1.01$.
-The sampler returns 4000 draws, however because we are doing MCMC, these are not independent;
-the [Effective Sample Size](https://mc-stan.org/docs/reference-manual/analysis.html#effective-sample-size.section)
-accounts for correlations (or anti-correlations).
+The centered parameterization runs all have post-warmup divergences.
+Further inspection of the individual parameter estimates of `y` and `x[1]` show poor $\hat R$ values for both, indicating a failure to converge;
+the sample is not a representative sample from the target density.
 
-The centered parameterization shows poor convergence, extremely low ESS_bulk; and a biased estimate of `y`.
 
 ```{python}
-cp_summary.loc[['y'], ['Mean', 'StdDev', 'ESS_bulk', 'ESS_bulk/s', 'R_hat']]
+prior_fit_summary[
+    [
+        "Parameterization",
+        "Variable",
+        "Median ESS_bulk/s",
+        "Minimum ESS_bulk/s",
+        "Median R_hat",
+        "Maximum R_hat",
+        "Runs with R_hat > 1.01",
+    ]
+].set_index(["Parameterization", "Variable"]).round(2)
 ```
 
-The non-centered parametrization does quite well.
+
+The non-centered parametrization runs show that all chains converge.
 Note that both `y` and `y_std` have identical ESS_bulk; this is because
 the non-centered transform is a deterministic rescaling of `y`.
 
-```{python}
-ncp_summary.loc[['y', 'y_std'], ['Mean', 'StdDev', 'ESS_bulk', 'ESS_bulk/s', 'R_hat']]
-```
-
-Note the difference in `ESS_bulk/s`:  this is quantity `ESS_bulk` divided by
-the total sampling time (i.e., excluding warmup) across all chains.
-The non-centered parameterization is over 1000 times faster!
-
-We create plots from the returned samples.
+The posterior geometry is 10-dimensional.
+We produce a 2-d scatterplot between the population-level parameter
+and one of the local parameters.
 
 ```{python}
+#| output: false
+
+funnel_priors_cp_stan = os.path.join("stan", "funnel_priors_cp.stan")
+funnel_priors_ncp_stan = os.path.join("stan", "funnel_priors_ncp.stan")
+funnel_priors_cp = CmdStanModel(stan_file=funnel_priors_cp_stan)
+funnel_priors_ncp = CmdStanModel(stan_file=funnel_priors_ncp_stan)
+
+funnel_priors_cp_fit = funnel_priors_cp.sample(
+    seed=4242,
+    show_progress=False,
+)
+funnel_priors_ncp_fit = funnel_priors_ncp.sample(
+    seed=4242,
+    show_progress=False,
+)
+
 funnel_plot_cp = plot_divergences(fit=funnel_priors_cp_fit, 
                                   x_var='x[1]', 
                                   y_var='y', 
@@ -405,7 +447,7 @@ funnel_plot_ncp_xforms.show()
 funnel_plot_cp.show()
 ```
 
-These two plots show the funnel density.
+These two plots show the funnel density typical of a hierarchical model.
 Note that for the non-centered parameterization the y-axis ranges from $(-10, 10)$, while the
 centered parameterization only ranges from $(-5, 10)$.
 The non-centered parameterization is able to explore more of the funnel,
@@ -423,12 +465,12 @@ However, the posterior is proportional to the prior times the data model:
 $$
 p(\theta \mid y) \propto p(\theta) \, p(y \mid \theta)
 $$
-The data distribution contributes its own geometry.
-At the point where the contribution of the data distribution swamps that of the prior,
+The data distribution contributes its own geometry and
 this determines the shape of the posterior density that the sampler must navigate.
-(For more discussion see Andrew Gelman's memorable blog post
-[Don't strain at the gnat of prior while swallowing the camel of the likelihood](andrewgelman.com).)
-
+With increasing amounts of data,
+as some point the contribution of the data distribution swamps that of the prior.
+For this simple model, as the sampler sees more an more trials for a given group,
+it becomes easier to estimate the local parameter theta, the log-odds chance of success.
 
 To see how this works, we add a data distribution statement and corersponding data definitions
 to these Stan programs for simple hierarchical logistic regression model.
@@ -483,13 +525,14 @@ using both the centered and non-centered parameterizations and compare the resul
 We can check that a Stan model is well-specified by writing the corresponding data-generating program
 and then fitting the model on the generated data.
 We use this procedure to generate a series of observations of repeated binary trials
-with a given probability of success `theta`.
+with a given probability of success `p`, which is derived from the log-odds chance of success `theta`,
+i.e., `p = inv_logit(theta)`.
 Here is the Stan code:
 
 ```{.stan include="stan/datagen_repeated_binary_trials.stan"}
 ```
 
-For each group we record `theta`, the log-odds of success.
+For each group we record `theta`, the group-level log-odds chance of success.
 Given the sequence of repeated binary trials, we can create datasets for any number of observations.
 From this raw data, we will create a series of nested datasets of the following sizes:
 $2, 4, 8, 16, 64, 256, 2048, 32768$.
@@ -514,12 +557,10 @@ simulation = datagen.sample(
 
 theta_true = simulation.stan_variable("theta")[0]
 trials = simulation.stan_variable("y")[0].astype(int)
-// TODO: we can get log_sigma_sq from summary stats of stan_variable theta, right?
 ```
 
 ::: {.column-margin}
-We use a fixed random seed for reproducibility; remove this to generate datasets with a different
-values of local parameter `x`.
+We use a fixed random seed for reproducibility; remove this to generate datasets with a different values of `theta`.
 :::
 
 Next we create the nested datasets.
@@ -551,19 +592,77 @@ pd.DataFrame(
 
 ### Fitting both models
 
-We instantiate both models.
+To compare both models we need to fit each model to each dataset, a total of 16 fits,
+and we need to do this 100 times with different random seeds in order to properly evaluate
+sampler performance.
+We do this using a Python script which tabulates the summary statistics from each run.
+The following table shows the divergences per run.
 
 ```{python}
+data_fit_summary = pd.read_csv(
+    os.path.join("results", "cp_ncp_data_fits.csv")
+)
+data_run_summary = data_fit_summary.drop_duplicates(["Parameterization", "N"])
+data_run_summary[
+    [
+        "Parameterization",
+        "N",
+        "Runs",
+        "Runs with a divergence",
+        "Average total divergences",
+        "Average affected chains",
+    ]
+].set_index(["Parameterization", "N"]).round(2)
+```
+
+We inspect the individual parameter estimates for the population parameter `log_sigma_sq`
+and the local parameters `theta[1]` and `theta_std[1]` (for the non-centered parameterization).
+
+```{python}
+columns = [
+    "Parameterization",
+    "N",
+    "Variable",
+    "Median ESS_bulk/s",
+    "Minimum ESS_bulk/s",
+    "Median R_hat",
+    "Maximum R_hat",
+    "Runs with R_hat > 1.01",
+]
+
+summary = data_fit_summary[columns].set_index(
+    ["Parameterization", "N", "Variable"]
+)
+
+numeric_columns = summary.select_dtypes(include="number").columns
+
+formats = {
+    column: "{:,.2f}"
+    if column in {"Median R_hat", "Maximum R_hat"}
+    else "{:,.0f}"
+    for column in numeric_columns
+}
+(
+    summary.style
+    .format(formats, na_rep="—")
+    .set_properties(
+        subset=numeric_columns,
+        **{"text-align": "right"},
+    )
+)
+```
+
+
+TODO.  PATCH THIS TOGETHER!
+
+```{python}
+#| output: false
+
 funnel_cp_stan = os.path.join('stan', 'funnel_data_cp.stan')
 funnel_cp = CmdStanModel(stan_file=funnel_cp_stan)
 funnel_ncp_stan = os.path.join('stan', 'funnel_data_ncp.stan')
 funnel_ncp = CmdStanModel(stan_file=funnel_ncp_stan)
-```
 
-We fit both models on the eight nested datasets.
-To organize this work, we create two helper classes
-that index the models, the parameters of interest, and the returned samples.
-```{python}
 @dataclass(frozen=True)
 class Parameterization:
     label: str
@@ -591,16 +690,6 @@ PARAMETERIZATIONS = (
         sampled_y="log_sigma_sq",
     ),
 )
-```
-
-We fit every model to every dataset via two nested loops:  the outer loop is by model,
-centered parameterization first, then non-centered parameterization.
-The inner loop by dataset from smallest to largest.
-CmdStanPy produces a series of logging messages consisting of start/finish messages interleaved with
-messages reporting divergences per chain and transient error messages from the sampler.
-
-```{python}
-#| output: false
 
 def fit_dataset(
     parameterization: Parameterization,
@@ -630,52 +719,7 @@ for parameterization in PARAMETERIZATIONS:
                 fit=fit,
             )
         )
-```
 
-The first few fits were the centered parameterization running on small datasets;
-these runs resulted in some divergences.  The last few fits were from the non-centered parameterization
-running on large datasets; a few computations raised errors.
-The following table shows the divergences per run.
-
-```{python}
-def divergence_summary(fits: Sequence[ModelFit]) -> pd.DataFrame:
-    """Return one row of divergence diagnostics per fitted model."""
-    rows: list[dict[str, object]] = []
-
-    for result in fits:
-        divergent = result.fit.method_variables()["divergent__"]
-        rows.append(
-            {
-                "parameterization": result.parameterization.label,
-                "N": result.n_obs,
-                "draws": divergent.size,
-                "divergent": divergent.sum(),
-                "percent divergent": 100 * divergent.mean(),
-            }
-        )
-
-    summary = pd.DataFrame(rows)
-    parameterization_order = list(
-        dict.fromkeys(result.parameterization.label for result in fits)
-    )
-    summary["parameterization"] = pd.Categorical(
-        summary["parameterization"],
-        categories=parameterization_order,
-        ordered=True,
-    )
-    return summary.sort_values(["parameterization", "N"], ignore_index=True)
-
-divergence_summary(fits)
-```
-
-For small amounts of observations per group the centered parameterization had divergences,
-however, there were fewer divergences than the $46$ total divergences across all chains
-that we saw when we fit the prior-only model in the previous section.
-For the largest dataset, the non-centered parameterization had 1 divergence.
-
-
-
-```{python}
 def draws_xy(
     fit: CmdStanMCMC, x_variable: str, y_variable: str
 ) -> pd.DataFrame:
@@ -770,7 +814,7 @@ def plot_divergence_grid(
 ```
 
 ```{python}
-print(f'data generating parameter log_sigma_sq: {theta_true[0]}')
+print('data generating parameter log_sigma_sq: 0')
 print(f'data generating parameter theta[1]: {theta_true[0]}')
 ```
 
@@ -819,39 +863,6 @@ high_data_plot = plot_divergence_grid(
 high_data_plot
 ```
 
-TODO:  get timing information; ESS/s
-
-```python
-def ess_sec_summary(fits: Sequence[ModelFit]) -> pd.DataFrame:
-    """Return one row of ESS/sec diagnostics per fitted model."""
-    rows: list[dict[str, object]] = []
-// ******** need to run summary?  get ESS/sec 
-    for result in fits:
-    	// ********  stopped here
-        ess_sec = result.fit.method_variables()["divergent__"]
-        rows.append(
-            {
-                "parameterization": result.parameterization.label,
-                "N": result.n_obs,
-                "draws": divergent.size,
-                "divergent": divergent.sum(),
-                "percent divergent": 100 * divergent.mean(),
-            }
-        )
-
-    summary = pd.DataFrame(rows)
-    parameterization_order = list(
-        dict.fromkeys(result.parameterization.label for result in fits)
-    )
-    summary["parameterization"] = pd.Categorical(
-        summary["parameterization"],
-        categories=parameterization_order,
-        ordered=True,
-    )
-    return summary.sort_values(["parameterization", "N"], ignore_index=True)
-
-ess_sec_summary(fits)
-```
 
 ## Compatible Parameterizations
 

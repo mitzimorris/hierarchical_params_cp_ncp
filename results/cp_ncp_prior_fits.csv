@@ -1,0 +1,6 @@
+Parameterization,Variable,Runs,Runs with a divergence,Average total divergences,Average affected chains,Average warmup seconds,Average sampling seconds,Median ESS_bulk/s,Minimum ESS_bulk/s,Median R_hat,Maximum R_hat,Runs with R_hat > 1.01
+Centered,y,100,99,14.85,2.43,0.09776,0.12739,283.744,51.2029,1.10369,1.51294,100
+Centered,x[1],100,99,14.85,2.43,0.09776,0.12739,36143.05,4562.16,1.050705,1.38127,99
+Non-centered,y,100,0,0.0,0.0,0.0202,0.04443,176404.5,122506.0,1.0010249999999998,1.00607,0
+Non-centered,y_std,100,0,0.0,0.0,0.0202,0.04443,176404.5,122506.0,1.00102,1.00607,0
+Non-centered,x_std[1],100,0,0.0,0.0,0.0202,0.04443,177732.5,131816.0,1.00083,1.00565,0
