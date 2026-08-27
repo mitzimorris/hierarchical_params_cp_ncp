@@ -10,7 +10,7 @@ import pandas as pd
 from cmdstanpy import CmdStanModel, disable_logging
 
 N_GROUPS = 9
-N_OBS = (2, 4, 8, 16, 64, 256, 2048, 32768)
+N_OBS = (2, 4, 16, 64, 128, 256, 2048, 32768)
 N_RUNS = 100
 N_CHAINS = 4
 N_WARMUP = 1_000
@@ -81,6 +81,8 @@ with disable_logging():
                     )
 
                     divergent = fit.method_variables()["divergent__"]
+                    n_leapfrog = fit.method_variables()["n_leapfrog__"]
+                    stepsize = fit.method_variables()["stepsize__"]
                     fit_summary = fit.summary()
                     warmup_seconds = sum(chain["warmup"] for chain in fit.time)
                     sampling_seconds = sum(chain["sampling"] for chain in fit.time)
@@ -94,6 +96,8 @@ with disable_logging():
                                 "Variable": variable,
                                 "Total divergences": int(divergent.sum()),
                                 "Chains with a divergence": int(divergent.any(axis=0).sum()),
+                                "Stepsize": float(stepsize.mean()),
+                                "Mean leapfrog steps": float(n_leapfrog.mean()),
                                 "Warmup seconds": warmup_seconds,
                                 "Sampling seconds": sampling_seconds,
                                 "ESS_bulk/s": fit_summary.loc[variable, "ESS_bulk/s"],
@@ -113,6 +117,8 @@ summary = (
         runs_with_divergence=("Total divergences", lambda values: int((values > 0).sum())),
         average_divergences=("Total divergences", "mean"),
         average_affected_chains=("Chains with a divergence", "mean"),
+        average_stepsize=("Stepsize", "mean"),
+        average_n_leapfrog=("Mean leapfrog steps", "mean"),
         average_warmup_seconds=("Warmup seconds", "mean"),
         average_sampling_seconds=("Sampling seconds", "mean"),
         median_ess_per_second=("ESS_bulk/s", "median"),
@@ -128,6 +134,8 @@ summary = (
             "runs_with_divergence": "Runs with a divergence",
             "average_divergences": "Average total divergences",
             "average_affected_chains": "Average affected chains",
+            "average_stepsize": "Stepsize",
+            "average_n_leapfrog": "Average leapfrog steps",
             "average_warmup_seconds": "Average warmup seconds",
             "average_sampling_seconds": "Average sampling seconds",
             "median_ess_per_second": "Median ESS_bulk/s",

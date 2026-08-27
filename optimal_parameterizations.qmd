@@ -45,46 +45,16 @@ import numpy as np
 import pandas as pd
 import plotnine as p9
 from collections.abc import Sequence
-from dataclasses import dataclass
 from pathlib import Path
 
-from cmdstanpy import CmdStanModel, CmdStanMCMC
-
-def plot_divergences(
-    fit: CmdStanMCMC,
-    x_var: str,
-    y_var: str,
-    title: str | None = None,
-    subtitle: str | None = None,
-) -> p9.ggplot:
-    """Scatterplot of two parameters from a fit, divergent transitions in red.
-
-    Non-divergent draws are plotted in dark grey at alpha 0.5, divergent draws
-    are overplotted in red. Variable names are cmdstanpy column labels, using
-    Stan's 1-based indexing, e.g. 'x[1]' or 'theta[1]'.
-    """
-    draws: pd.DataFrame = fit.draws_pd()
-    plot_data = pd.DataFrame(
-        {
-            "x": draws[x_var].to_numpy(),
-            "y": draws[y_var].to_numpy(),
-            "divergent": draws["divergent__"].to_numpy() > 0,
-        }
-    )
-    kept = plot_data[~plot_data["divergent"]]
-    diverged = plot_data[plot_data["divergent"]]
-    return (
-        p9.ggplot(plot_data, p9.aes(x="x", y="y"))
-        + p9.geom_point(data=kept, color="#333333", alpha=0.5, size=1.0)
-        + p9.geom_point(data=diverged, color="red", alpha=0.8, size=1.0)
-        + p9.labs(
-            x=x_var,
-            y=y_var,
-            title=title if title is not None else f"{y_var} vs {x_var}",
-            subtitle=subtitle
-        )
-        + p9.theme_minimal()
-    )
+from cmdstanpy import CmdStanModel
+from python_helpers import (
+    Parameterization,
+    facet_frame,
+    fit_parameterizations,
+    plot_divergence_grid,
+    plot_divergences,
+)
 
 p9.options.figure_size = (6, 6)
 p9.options.dpi = 100
@@ -100,13 +70,13 @@ how to recognize situations where switching from one to the other may improve
 sampling efficiency and the inference accuracy.
 
 There are many exellent presentations on the centered and non-centered parameterization already.
-It is discussed in the [Stan User's Guide](https://mc-stan.org/docs/stan-users-guide/) chapter "Efficiency Tuning",
-section [reparameterization](https://mc-stan.org/docs/stan-users-guide/efficiency-tuning.html#funnel.figure),
+It is discussed in the [Stan User's Guide](https://mc-stan.org/docs/stan-users-guide/) chapter on "Efficiency Tuning"
+section on [reparameterization](https://mc-stan.org/docs/stan-users-guide/efficiency-tuning.html#funnel.figure)
 and at greater length in @Betancourt-Girolami:2013, "Hamiltonian Monte Carlo for Hierarchical Models"
 and @papa-et-al:2007, "A General Framework for the Parametrization of Hierarchical Models".
 The Stan User's Guide and numerous case studies and examples show how to rewrite
-a model, usually going from the centered to non-centered parameterization.
-Each of these assumes a certain amount of background knowledge.
+a model from the natural, or "centered" parameterization to the non-centered version.
+These sources assume a certain amount of background knowledge.
 This case study connects the dots between these disucssions
 with the goal of helping the applied statistician or analyst
 develop and trouble-shoot multi-level models for their data.
@@ -282,7 +252,7 @@ The isotropic Gaussian is merely the product of ten normal distributions.
 Both distributions are defined on the same space, $\mathbb{R}^{10}$.
 Below we show the contour plots on the log scale for $x_1, y$ of the density for each.
 
-![Easy and hard density plots](plots/easy_vs_hard.png)
+![Easy and hard density plots](img/easy_vs_hard.png)
 
 The isotropic Gaussian contours are spherical.
 The probability contours of the funnel are shaped like ten-dimensional funnels (hence the name).
@@ -332,8 +302,11 @@ both the median and worst values (lowest `ESS_bulk/s` and highest $\hat R$).
 $\hat R$ is a measure of convergence; if it is greater than $1.01$ the sampler did not
 properly converge during warmup and all other estimates should be ignored.
 Each fit returns 4000 draws, but we must account for autocorrelated draws.
-$N_{eff}$ is the number of independent samples with the same estimation power\
+[ESS](https://mc-stan.org/docs/reference-manual/analysis.html#effective-sample-size.section) is the *effective sample size*,
+also written as $N_{eff}$.
+It is the number of independent samples with the same estimation power
 as the $N$ autocorrelated samples.
+`ESS_bulk` is the ESS for draws in the bulk of the posterior.
 `ESS_bulk/s` compares $N_{eff}$ per second; higher `ESS_bulk/s` is better
 (provided that $\hat R$ is acceptable).
 :::
@@ -361,7 +334,7 @@ the sample is not a representative sample from the target density.
 
 
 ```{python}
-prior_fit_summary[
+summary = prior_fit_summary[
     [
         "Parameterization",
         "Variable",
@@ -371,9 +344,25 @@ prior_fit_summary[
         "Maximum R_hat",
         "Runs with R_hat > 1.01",
     ]
-].set_index(["Parameterization", "Variable"]).round(2)
-```
+].set_index(["Parameterization", "Variable"])
 
+numeric_columns = summary.select_dtypes(include="number").columns
+
+formats = {
+    column: "{:,.2f}"
+    if column in {"Median R_hat", "Maximum R_hat"}
+    else "{:,.0f}"
+    for column in numeric_columns
+}
+(
+    summary.style
+    .format(formats, na_rep="—")
+    .set_properties(
+        subset=numeric_columns,
+        **{"text-align": "right"},
+    )
+)
+```
 
 The non-centered parametrization runs show that all chains converge.
 Note that both `y` and `y_std` have identical ESS_bulk; this is because
@@ -382,6 +371,13 @@ the non-centered transform is a deterministic rescaling of `y`.
 The posterior geometry is 10-dimensional.
 We produce a 2-d scatterplot between the population-level parameter
 and one of the local parameters.
+
+
+The first pair of plots shows the space the sampler actually moves in:
+`x_std[1]` and `y_std` for the non-centered parameterization (left)
+and parameters `x[1]` and `y` for the centered parameterization (right).
+The sampler sees the isotropic Gaussian in the non-centered version
+and the funnel in the centered one, matching the analytic plots from the previous section.
 
 ```{python}
 #| output: false
@@ -419,13 +415,6 @@ funnel_plot_ncp_xforms = plot_divergences(fit=funnel_priors_ncp_fit,
                                   subtitle='transformed parameters x[1], y')
 ```
 
-First we show the space the sampler actually moves in:
-`x_std[1]` and `y_std` for the non-centered parameterization (left)
-and parameters `x[1]` and `y` for the centered parameterization (right).
-The sampler sees the isotropic Gaussian in the non-centered version
-and the funnel in the centered one, matching the analytic plots from the previous section.
-
-
 ```{python}
 #| layout-ncol: 2
 funnel_plot_ncp_params.show()
@@ -447,12 +436,13 @@ funnel_plot_ncp_xforms.show()
 funnel_plot_cp.show()
 ```
 
-These two plots show the funnel density typical of a hierarchical model.
-Note that for the non-centered parameterization the y-axis ranges from $(-10, 10)$, while the
+Both plots show the funnel density typical of a hierarchical model.
+For the non-centered parameterization the y-axis ranges from $(-10, 10)$, while the
 centered parameterization only ranges from $(-5, 10)$.
 The non-centered parameterization is able to explore more of the funnel,
 especially further into the neck, without any divergences.
-
+As noted above, the R-hat diagnostics indicate that the centered parameterization has to converge,
+so these draws are not a valid sample from the posterior.
 
 ## First hierarchical model: simple logistic regression
 
@@ -535,13 +525,13 @@ Here is the Stan code:
 For each group we record `theta`, the group-level log-odds chance of success.
 Given the sequence of repeated binary trials, we can create datasets for any number of observations.
 From this raw data, we will create a series of nested datasets of the following sizes:
-$2, 4, 8, 16, 64, 256, 2048, 32768$.
+$2, 4, 16, 64, 128, 256, 2048, 32768$.
 
 First we generate the raw data.
 
 ```{python}
 N_GROUPS = 9
-N_OBS = (2, 4, 8, 16, 64, 256, 2048, 32768)
+N_OBS = (2, 4, 16, 64, 128, 256, 2048, 32768)
 
 datagen_stan = os.path.join('stan', 'datagen_repeated_binary_trials.stan')
 datagen = CmdStanModel(stan_file=datagen_stan)
@@ -652,8 +642,18 @@ formats = {
 )
 ```
 
+The above table shows that
+the centered parameterization reliably converges for datasets with 256 observations per group or higher
+while the non-centered parameterization shows the opposite behavoir.
+What is especially notable is the extremely low `ESS_bulk/s` values for the non-centered parameterization
+when there are large amounts of data.
 
-TODO.  PATCH THIS TOGETHER!
+To understand these patterns we repeat the plots from the previous section
+which show the space the sampler moves in:
+`log_sigma_sq` and `theta[1]` for the centered parameterization
+and `log_sigma_sq_standard` and `theta_std[1]` for the non-centered parameterization.
+To visualize all 16 fits, we divide fits by data regime:  the low data regime: $2, 4, 16, 64$
+observations per group, and the high-data regime: $128, 256, 2048, 32768$ observations per group.
 
 ```{python}
 #| output: false
@@ -662,19 +662,6 @@ funnel_cp_stan = os.path.join('stan', 'funnel_data_cp.stan')
 funnel_cp = CmdStanModel(stan_file=funnel_cp_stan)
 funnel_ncp_stan = os.path.join('stan', 'funnel_data_ncp.stan')
 funnel_ncp = CmdStanModel(stan_file=funnel_ncp_stan)
-
-@dataclass(frozen=True)
-class Parameterization:
-    label: str
-    model: CmdStanModel
-    sampled_x: str
-    sampled_y: str
-
-@dataclass(frozen=True)
-class ModelFit:
-    parameterization: Parameterization
-    n_obs: int
-    fit: CmdStanMCMC
 
 PARAMETERIZATIONS = (
     Parameterization(
@@ -687,142 +674,34 @@ PARAMETERIZATIONS = (
         label="non-centered",
         model=funnel_ncp,
         sampled_x="theta_std[1]",
-        sampled_y="log_sigma_sq",
+        sampled_y="log_sigma_sq_std",
     ),
 )
 
-def fit_dataset(
-    parameterization: Parameterization,
-    dataset: dict[str, object],
-    seed: int,
-) -> CmdStanMCMC:
-    """Fit one parameterization to one Stan dataset."""
-    return parameterization.model.sample(
-        data=dataset,
-        seed=seed,
-        show_progress=False,
-    )
-
-fits: list[ModelFit] = []
-
-for parameterization in PARAMETERIZATIONS:
-    for n_obs in N_OBS:
-        fit = fit_dataset(
-            parameterization=parameterization,
-            dataset=datasets[n_obs],
-            seed=12345 + n_obs,
-        )
-        fits.append(
-            ModelFit(
-                parameterization=parameterization,
-                n_obs=n_obs,
-                fit=fit,
-            )
-        )
-
-def draws_xy(
-    fit: CmdStanMCMC, x_variable: str, y_variable: str
-) -> pd.DataFrame:
-    """Extract two variables and the divergence indicator from a fit."""
-    draws = fit.draws_pd()
-    return pd.DataFrame(
-        {
-            "x": draws[x_variable].to_numpy(),
-            "y": draws[y_variable].to_numpy(),
-            "divergent": draws["divergent__"].to_numpy() > 0,
-        }
-    )
-
-def facet_frame(
-    fits: Sequence[ModelFit],
-    n_obs_values: Sequence[int],
-    y_variable: str = "log_sigma_sq",
-) -> pd.DataFrame:
-    """Stack selected fits into a tidy frame for faceted plotting."""
-    requested_sizes = set(n_obs_values)
-    selected_fits = [result for result in fits if result.n_obs in requested_sizes]
-
-    frames = []
-    for result in selected_fits:
-        parameterization = result.parameterization
-        facet_label = f"{parameterization.label}: {parameterization.sampled_x}"
-        frames.append(
-            draws_xy(
-                result.fit,
-                x_variable=parameterization.sampled_x,
-                y_variable=y_variable,
-            ).assign(
-                parameterization=facet_label,
-                N=f"N = {result.n_obs}",
-            )
-        )
-
-    frame = pd.concat(frames, ignore_index=True)
-    parameterization_order = list(
-        dict.fromkeys(
-            f"{result.parameterization.label}: {result.parameterization.sampled_x}"
-            for result in fits
-        )
-    )
-    frame["parameterization"] = pd.Categorical(
-        frame["parameterization"],
-        categories=parameterization_order,
-        ordered=True,
-    )
-    frame["N"] = pd.Categorical(
-        frame["N"],
-        categories=[f"N = {n_obs}" for n_obs in n_obs_values],
-        ordered=True,
-    )
-    return frame
-
-def plot_divergence_grid(
-    data: pd.DataFrame,
-    title: str,
-    subtitle: str = "Divergent transitions in red",
-    figure_size: tuple[float, float] = (8.0, 6.0),
-    coords: p9.coord_cartesian | None = None,
-) -> p9.ggplot:
-    """Plot sampler coordinates using fixed grid size."""
-    nondivergent = data[~data["divergent"]]
-    divergent = data[data["divergent"]]
-    if coords is None:
-      coords = p9.coord_cartesian(xlim=(-10, 10), ylim=(-10, 10))
-
-    return (
-        p9.ggplot(data, p9.aes(x="x", y="y"))
-        + p9.geom_point(
-            data=nondivergent, color="#333333", alpha=0.4, size=0.7
-        )
-        + p9.geom_point(data=divergent, color="red", alpha=0.8, size=0.7)
-
-        + p9.facet_grid(
-          rows="parameterization",
-          cols="N",
-          scales="fixed",
-          )
-        + coords
-        + p9.labs(
-            x="group 1 parameter",
-            y="log_sigma_sq",
-            title=title,
-            subtitle=subtitle,
-        )
-        + p9.theme_minimal()
-        + p9.theme(figure_size=figure_size)
-    )
+fits = fit_parameterizations(
+    parameterizations=PARAMETERIZATIONS,
+    datasets=datasets,
+    n_obs_values=N_OBS,
+    seed_offset=12345,
+)
 ```
+
+The data-generating program which produced the simulated datasets chooses values for `theta` as follows
+
+```stan
+  vector[N_groups] theta;
+  for (i in 1:N_groups) {
+    theta[i] = std_normal_rng();  // mu = 0, sigma = 1
+  }
+```
+
+Thus we know that the population level parameter variance parameter is distributed $\mathrm{Normal}(0, 1)$
+and thus `log_sigma_sq` has true value $0$.
+The true values for vector `theta` have been recorded.  The true value for `theta[1]` is:
 
 ```{python}
-print('data generating parameter log_sigma_sq: 0')
 print(f'data generating parameter theta[1]: {theta_true[0]}')
 ```
-
-Again, we plot the space the sampler moves in:
-parameters `theta[1]` and `log_sigma_sq` for the centered parameterization and
-and `theta_std[1]` against `log_sigma_sq` for the non-centered parameterization.
-To visualize all 16 fits, we divide fits by data regime:  the low data regime: $2, 4, 8, 16$
-observations per group, and the high-data regime: $64, 256, 2048, 32768$ observations per group.
 
 The low data regime plots are all plotted on the same scale:
 the x-axis ranges from $(-4, 8)$ and the y-axis ranges from $(-12, 6)$.
@@ -836,6 +715,7 @@ LOW_DATA_N = N_OBS[:4]
 
 low_data_plot = plot_divergence_grid(
     facet_frame(fits, LOW_DATA_N),
+    parameterizations=PARAMETERIZATIONS,
     title="Low data regime: group[1] parameter against population scale",
     coords = p9.coord_cartesian(xlim=(-4, 8), ylim=(-12, 6))
 )
@@ -845,23 +725,117 @@ low_data_plot
 With more data, the sampler is able to get a tighter estimate on estimates of both `theta` and `log_sigma_sq`.
 The high data regime plots are plotted with x-axis range $(-3, 3)$ and the y-axis range from $(-4, 2)$,
 (cf x-axis $(-4, 8)$, and y-axis $(-12, 6)$).
-The values of `theta` were generated `std_normal_rng()`, thus we expect `log_sigma_sq` to be roughly
-centered on zero.
-The true value of `theta[1]` is $1.05$.
-As the amount of data per group increases, the centered parameterization hones in on this value,
-but shows a spread on the vertical axis due to uncertainty about the population-level variance.
-The non-centered parameterization begins to show a pathology called the "inverse funnel".
 
 
 ```{python}
 HIGH_DATA_N = N_OBS[4:]
 high_data_plot = plot_divergence_grid(
     facet_frame(fits, HIGH_DATA_N),
+    parameterizations=PARAMETERIZATIONS,
     title="High data regime: sampler parameter against population scale",
     coords = p9.coord_cartesian(xlim=(-3, 3), ylim=(-4, 2))
 )
 high_data_plot
 ```
+
+### Sampler behavoirs in low and high data regimes
+
+The centered model has a hierarchical prior on the population variance and group-level log odds
+and a binomial_logit likelihood.
+
+```stan
+parameters {
+  real log_sigma_sq;
+  vector[9] theta;                  // log odds success
+}
+model {
+  log_sigma_sq ~ normal(0, 3);
+  theta ~ normal(0, exp(log_sigma_sq/2));
+  y ~ binomial_logit(N, theta);
+}
+```
+
+The data-generating value of theta[1] is (1.05). As the number of observations per group increases,
+each group’s binomial likelihood becomes increasingly concentrated around its data-generating value.
+The posterior estimates of the nine group effects are therefore determined primarily
+by their group-specific data rather than by the hierarchical prior.
+Once the group effects are estimated precisely,
+they behave like nine nearly observed draws from a normal distribution centered at $0$
+and the variation across groups informs the scale `log_sigma_sq`.
+
+In the centered coordinates, the tightly estimated `theta[j]` values depend only weakly
+on the remaining uncertainty in the population variance and the scatterplot looks like a
+vertical line.
+Increasing the observations per group does not eliminate uncertainty about `log_sigma_sq`
+because the number of groups remains fixed at $9$.
+It instead approaches the uncertainty associated with estimating a population
+variance from $9$ accurately measured group effects.
+
+The non-centered parameterization begins to show a pathology called the "inverse funnel".
+While the priors make `log_sigma_sq_std` and `theta_std` independent,
+the likelihood, is expressed in terms of the transformed parameter `theta`:
+
+```stan
+transformed parameters {
+  real log_sigma_sq = 3.0 * log_sigma_sq_std;
+  vector[9] theta = exp(log_sigma_sq/2) * theta_std;
+}
+model {
+  log_sigma_sq_std ~ std_normal();
+  theta_std ~ std_normal();
+  y ~ binomial_logit(N, theta);
+}
+```
+
+In the high-data regime, the binomial likelihood tightly constrains each `theta[j]`.
+In order to keep theta[j] near the value supported by the data
+changes in `log_sigma_sq_std` must be offset by changes in `theta_std[j]`.
+The sampled parameters, although independent under the prior, therefore become strongly and
+nonlinearly dependent in the posterior, producing the curved geometry visible in the plots.
+
+A real pain point of the inverse funnel is that the models fail to fit and do so very slowly.
+This is a consequence of the inverse funnel geometry; in order to move through
+the highly curved posterior, during warmup the sampler adjusts the step size lower and lower;
+during sampling the sampler moves very very slowly.
+To see this, we inspect the stepsize and number of leapfrog steps that sampler takes
+during each iteration together with the bulk ESS/second.
+
+
+```{python}
+columns = [
+    "Parameterization",
+    "N",
+    "Variable",
+    "Stepsize",
+    "Average leapfrog steps",    
+    "Median ESS_bulk/s",
+    "Runs with R_hat > 1.01",
+]
+
+summary = data_fit_summary[columns].set_index(
+    ["Parameterization", "N", "Variable"]
+)
+
+numeric_columns = summary.select_dtypes(include="number").columns
+
+formats = {
+    column: "{:,.2f}"
+    if column in {"Stepsize", "Average leapfrog steps"}
+    else "{:,.0f}"
+    for column in numeric_columns
+}
+(
+    summary.style
+    .format(formats, na_rep="—")
+    .set_properties(
+        subset=numeric_columns,
+        **{"text-align": "right"},
+    )
+)
+```
+
+
+
 
 
 ## Compatible Parameterizations
