@@ -1065,6 +1065,11 @@ $$
 
 The $0.5$ adjustment prevents infinite logits for players with no hits or no outs.
 
+We rerun the evaluation for both models using informed inits.
+Data-informed initialization reduces the number of non-centered runs with divergences only slightly, from 15 to 11.
+However, it reduces the average number of divergences from 80 to 0.19 and removes the extreme $\widehat R$ values.
+
+
 ```{python}
 # use saved output from python program:  python_helpers/run_baseball_fits_informed_init.py
 baseball_fit_2_summary = pd.read_csv(os.path.join("results", "cp_ncp_baseball_fits_informed_init.csv"))
@@ -1083,9 +1088,6 @@ baseball_run_2_summary[
     ]
 ].set_index("Parameterization").round(2)
 ```
-
-Data-informed initialization reduces the number of non-centered runs with divergences only slightly, from 15 to 11.
-However, it reduces the average number of divergences from 80 to 0.19 and removes the extreme $\widehat R$ values.
 
 The remaining divergences reflect the posterior geometry rather than a chain becoming trapped after an extreme initialization.
 Initialization can help the sampler reach and adapt to the typical set,
@@ -1122,11 +1124,12 @@ formats = {
     )
 )
 ```
+The non-centered parameterization is nevertheless more robust computationally: across repeated fits, it is less sensitive to the sampler’s initial state.
 
-The player-level estimates are ordered by the number of at-bats in the full season.
-As in the preceding plots, the thin interval represents average within-run posterior uncertainty,
-the thick interval represents variation in the posterior median across repeated fits,
-and opacity represents the proportion of runs passing the R-hat criteria.
+Next we compare the estimates of `alpha`, the player ability for all 18 players,
+ordered by the number of at-bats in the season.
+The thin interval represents average within-run posterior uncertainty,
+the thick interval represents variation in the posterior median across repeated fits.
 
 ```{python}
 baseball_player_plot = plot_baseball_player_estimates(
@@ -1169,9 +1172,10 @@ Major league baseball aficionados accept this as a reasonable estimate for a 197
 
 
 For these data, both parameterizations produce reliable fits and, when the sampler diagnostics are satisfactory, nearly identical posterior estimates.
-The non-centered parameterization is nevertheless more robust computationally: across repeated fits, it is less sensitive to the sampler’s initial state.
-
-
+This model is slightly more complex than the previous binomial logit model in that it estimates the both the population mean as well as the
+population sd.
+The dataset consists of 18 local groups, with differing numbers of observation per group, although they are all on roughly the same scale.
+For this dataset, the non-centered parameterization provides the more robust and efficient performance.
 
 
 ## Hierarchical regression, varying-slope varying-intercept version
