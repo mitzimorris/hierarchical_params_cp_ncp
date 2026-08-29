@@ -17,6 +17,10 @@ N_WARMUP = 1_000
 N_SAMPLING = 1_000
 DATA_SEED = 424242
 SEEDS = range(12345, 12345 + N_RUNS)
+ESTIMATE_VARIABLES = ("log_sigma_sq", "theta[1]")
+ESTIMATE_BASE_VARIABLES = ("log_sigma_sq", "theta")
+MEDIAN_R_HAT_LIMIT = 1.01
+MAXIMUM_R_HAT_LIMIT = 1.03
 
 
 def make_nested_datasets(
@@ -52,20 +56,32 @@ datasets = make_nested_datasets(trials, N_OBS)
 MODELS = (
     (
         "Centered",
-        CmdStanModel(stan_file=os.path.join("stan", "funnel_data_cp.stan")),
+        CmdStanModel(
+            stan_file=os.path.join("stan", "funnel_data_cp.stan"),
+            force_compile=True,
+        ),
         ("log_sigma_sq", "theta[1]"),
+        ("log_sigma_sq", *(f"theta[{index}]" for index in range(1, N_GROUPS + 1))),
     ),
     (
         "Non-centered",
-        CmdStanModel(stan_file=os.path.join("stan", "funnel_data_ncp.stan")),
+        CmdStanModel(
+            stan_file=os.path.join("stan", "funnel_data_ncp.stan"),
+            force_compile=True,
+        ),
         ("log_sigma_sq_std", "theta_std[1]"),
+        (
+            "log_sigma_sq_std",
+            *(f"theta_std[{index}]" for index in range(1, N_GROUPS + 1)),
+        ),
     ),
 )
 
 rows = []
+estimate_rows = []
 
 with disable_logging():
-    for parameterization, model, variables in MODELS:
+    for parameterization, model, variables, convergence_variables in MODELS:
         for n_obs in N_OBS:
             for run, seed in enumerate(SEEDS, start=1):
                 with TemporaryDirectory() as output_dir:
@@ -86,6 +102,12 @@ with disable_logging():
                     fit_summary = fit.summary()
                     warmup_seconds = sum(chain["warmup"] for chain in fit.time)
                     sampling_seconds = sum(chain["sampling"] for chain in fit.time)
+                    run_r_hat = fit_summary.loc[list(convergence_variables), "R_hat"]
+                    median_r_hat = float(run_r_hat.median())
+                    maximum_r_hat = float(run_r_hat.max())
+                    diagnostics_ok = bool(
+                        median_r_hat <= MEDIAN_R_HAT_LIMIT and maximum_r_hat < MAXIMUM_R_HAT_LIMIT
+                    )
 
                     for variable in variables:
                         rows.append(
@@ -105,10 +127,33 @@ with disable_logging():
                             }
                         )
 
+                    # CmdStanPy expands the base vector name ``theta`` into
+                    # theta[1], ..., theta[9]; indexed elements are not valid
+                    # values for its ``vars`` selector.
+                    estimate_draws = fit.draws_pd(vars=list(ESTIMATE_BASE_VARIABLES))
+                    for variable in ESTIMATE_VARIABLES:
+                        estimates = estimate_draws[variable]
+                        estimate_rows.append(
+                            {
+                                "Parameterization": parameterization,
+                                "N": n_obs,
+                                "Run": run,
+                                "Variable": variable,
+                                "Median R_hat": median_r_hat,
+                                "Maximum R_hat": maximum_r_hat,
+                                "Diagnostics OK": diagnostics_ok,
+                                "Mean": estimates.mean(),
+                                "q05": estimates.quantile(0.05),
+                                "q50": estimates.quantile(0.50),
+                                "q95": estimates.quantile(0.95),
+                            }
+                        )
+
                 if run % 10 == 0:
                     print(f"Finished {parameterization}, N={n_obs}, run {run}/{N_RUNS}")
 
 fits = pd.DataFrame(rows)
+estimate_runs = pd.DataFrame(estimate_rows)
 
 summary = (
     fits.groupby(["Parameterization", "N", "Variable"], sort=False)
@@ -147,7 +192,64 @@ summary = (
     )
 )
 
+estimate_run_counts = (
+    estimate_runs.groupby(["Parameterization", "N", "Variable"], sort=False)
+    .agg(
+        Runs=("Run", "size"),
+        **{"Runs passing diagnostics": ("Diagnostics OK", "sum")},
+    )
+    .reset_index()
+)
+estimate_summary = (
+    estimate_runs.groupby(["Parameterization", "N", "Variable"], sort=False)
+    .agg(
+        Mean=("Mean", "mean"),
+        q05=("q05", "mean"),
+        q50=("q50", "mean"),
+        q95=("q95", "mean"),
+    )
+    .reset_index()
+)
+estimate_summary = estimate_run_counts.merge(
+    estimate_summary,
+    on=["Parameterization", "N", "Variable"],
+    how="left",
+)
+
+# Match the diagnostics for the coordinates actually sampled by each model to
+# the equivalent inferential quantities shown in the estimate plot.
+estimate_diagnostics = summary[
+    [
+        "Parameterization",
+        "N",
+        "Variable",
+        "Median R_hat",
+        "Maximum R_hat",
+    ]
+].copy()
+estimate_diagnostics.loc[
+    estimate_diagnostics["Parameterization"].eq("Non-centered"),
+    "Variable",
+] = estimate_diagnostics.loc[
+    estimate_diagnostics["Parameterization"].eq("Non-centered"),
+    "Variable",
+].replace(
+    {
+        "log_sigma_sq_std": "log_sigma_sq",
+        "theta_std[1]": "theta[1]",
+    }
+)
+estimate_summary = estimate_summary.merge(
+    estimate_diagnostics,
+    on=["Parameterization", "N", "Variable"],
+    how="left",
+    validate="one_to_one",
+)
+
 results_dir = Path("results")
 results_dir.mkdir(exist_ok=True)
 summary.to_csv(results_dir / "cp_ncp_data_fits.csv", index=False)
+estimate_runs.to_csv(results_dir / "cp_ncp_data_estimate_runs.csv", index=False)
+estimate_summary.to_csv(results_dir / "cp_ncp_data_estimates.csv", index=False)
 print(summary.round(2).to_string(index=False))
+print(estimate_summary.round(3).to_string(index=False))

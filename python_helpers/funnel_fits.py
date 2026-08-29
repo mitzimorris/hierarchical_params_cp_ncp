@@ -194,6 +194,439 @@ def plot_divergence_grid(
     return upper_plot / lower_plot
 
 
+def parameter_estimate_frame(
+    estimates: pd.DataFrame,
+    n_obs_by_parameterization: Mapping[str, Sequence[int]],
+    variables: Sequence[str] = ("log_sigma_sq", "theta[1]"),
+) -> pd.DataFrame:
+    """Select common posterior summaries for specified data regimes."""
+    selected_frames = []
+    for parameterization, n_obs_values in n_obs_by_parameterization.items():
+        selected_frames.append(
+            estimates[
+                estimates["Parameterization"].str.casefold().eq(parameterization.casefold())
+                & estimates["N"].isin(n_obs_values)
+                & estimates["Variable"].isin(variables)
+            ]
+        )
+
+    frame = pd.concat(selected_frames, ignore_index=True)
+    if frame.empty:
+        raise ValueError("No fits matched the selected data regimes.")
+
+    frame["Variable"] = pd.Categorical(
+        frame["Variable"],
+        categories=list(variables),
+        ordered=True,
+    )
+    return frame.sort_values(["Variable", "Parameterization", "N"])
+
+
+def plot_parameter_estimates(
+    estimates: pd.DataFrame,
+    n_obs_by_parameterization: Mapping[str, Sequence[int]],
+    true_values: Mapping[str, float],
+    diagnostics: pd.DataFrame | None = None,
+    n_obs_breaks: Sequence[int] | None = None,
+    median_r_hat_limit: float = 1.01,
+    maximum_r_hat_limit: float = 1.03,
+    title: str = "Posterior estimates by parameterization",
+    subtitle: str | None = None,
+    figure_size: tuple[float, float] = (8.0, 6.0),
+) -> p9.ggplot:
+    """Plot posterior summaries for common parameters of selected fits."""
+    estimates = parameter_estimate_frame(
+        estimates,
+        n_obs_by_parameterization=n_obs_by_parameterization,
+    )
+    required_diagnostics = {"Median R_hat", "Maximum R_hat"}
+    missing_diagnostics = required_diagnostics.difference(estimates.columns)
+    if missing_diagnostics and diagnostics is not None and "Run" not in estimates:
+        diagnostic_columns = [
+            "Parameterization",
+            "N",
+            "Variable",
+            *sorted(missing_diagnostics),
+        ]
+        diagnostic_frame = diagnostics[diagnostic_columns].copy()
+        non_centered = diagnostic_frame["Parameterization"].eq("Non-centered")
+        diagnostic_frame.loc[non_centered, "Variable"] = diagnostic_frame.loc[
+            non_centered, "Variable"
+        ].replace(
+            {
+                "log_sigma_sq_std": "log_sigma_sq",
+                "theta_std[1]": "theta[1]",
+            }
+        )
+        diagnostic_frame = diagnostic_frame[
+            diagnostic_frame["Variable"].isin(estimates["Variable"].cat.categories)
+        ]
+        estimates = estimates.merge(
+            diagnostic_frame,
+            on=["Parameterization", "N", "Variable"],
+            how="left",
+            validate="one_to_one",
+        )
+        estimates["Variable"] = pd.Categorical(
+            estimates["Variable"],
+            categories=list(true_values),
+            ordered=True,
+        )
+        missing_diagnostics = required_diagnostics.difference(estimates.columns)
+
+    if missing_diagnostics:
+        missing = ", ".join(sorted(missing_diagnostics))
+        detail = (
+            "Regenerate cp_ncp_data_estimate_runs.csv with run_data_fits.py."
+            if "Run" in estimates
+            else "Supply a usable diagnostic summary."
+        )
+        raise ValueError(f"Estimate data are missing diagnostic columns ({missing}). {detail}")
+
+    diagnostics_ok = estimates["Median R_hat"].le(median_r_hat_limit) & estimates[
+        "Maximum R_hat"
+    ].lt(maximum_r_hat_limit)
+    estimates["Diagnostics"] = diagnostics_ok.map({True: "OK", False: "R-hat warning"})
+
+    pass_rate_columns = {"Runs", "Runs passing diagnostics"}
+    use_pass_rate = pass_rate_columns.issubset(estimates.columns)
+    if use_pass_rate:
+        estimates["diagnostic_pass_rate"] = (
+            estimates["Runs passing diagnostics"] / estimates["Runs"]
+        )
+        # Squaring the pass rate makes differences below 100% visually clear;
+        # the floor keeps even the least reliable estimates visible.
+        estimates["diagnostic_opacity"] = 0.05 + 0.95 * estimates["diagnostic_pass_rate"].pow(2)
+        alpha_variable = "diagnostic_opacity"
+    else:
+        alpha_variable = "Diagnostics"
+
+    if subtitle is None:
+        if use_pass_rate:
+            subtitle = (
+                "Intervals average run-level q05–q95; opacity is the proportion "
+                "of runs passing the R-hat criteria"
+            )
+        else:
+            summary_description = (
+                "Each interval is one fit; "
+                if "Run" in estimates
+                else "Run-level posterior summaries are averaged; "
+            )
+            subtitle = summary_description + (
+                f"OK: median R-hat ≤ {median_r_hat_limit:.2f} and "
+                f"maximum R-hat < {maximum_r_hat_limit:.2f}"
+            )
+
+    # Separate parameterizations only where they share an N, then add a small,
+    # deterministic within-group jitter for repeated fits. Multiplicative
+    # offsets remain visually symmetric on the logarithmic x-axis.
+    parameterizations_per_n = estimates.groupby("N")["Parameterization"].transform("nunique")
+    shared_n = parameterizations_per_n.gt(1)
+    x_multiplier = pd.Series(1.0, index=estimates.index)
+    x_multiplier.loc[shared_n & estimates["Parameterization"].eq("Centered")] = 1 / 1.08
+    x_multiplier.loc[shared_n & estimates["Parameterization"].eq("Non-centered")] = 1.08
+    if "Run" in estimates:
+        jitter_position = (((estimates["Run"] * 37) % 101) - 50) / 50
+        x_multiplier *= 1.025**jitter_position
+    estimates["Plot N"] = estimates["N"] * x_multiplier
+
+    id_vars = [
+        "Parameterization",
+        "N",
+        "Plot N",
+        "Variable",
+        alpha_variable,
+    ]
+    if "Run" in estimates:
+        id_vars.append("Run")
+    points = estimates.melt(
+        id_vars=id_vars,
+        value_vars=["q50", "Mean"],
+        var_name="Statistic",
+        value_name="Estimate",
+    )
+    points["Statistic"] = points["Statistic"].replace({"q50": "Median"})
+
+    references = pd.DataFrame(
+        [{"Variable": variable, "True value": value} for variable, value in true_values.items()]
+    )
+    references["Variable"] = pd.Categorical(
+        references["Variable"],
+        categories=list(estimates["Variable"].cat.categories),
+        ordered=True,
+    )
+
+    if n_obs_breaks is None:
+        n_obs_breaks = sorted(estimates["N"].unique())
+
+    run_level = "Run" in estimates
+    interval_size = 0.3 if run_level else 0.8
+    point_size = 1.0 if run_level else 2.4
+    alpha_scale = (
+        p9.scale_alpha_continuous(
+            limits=(0.05, 1),
+            breaks=tuple(0.05 + 0.95 * value**2 for value in (0, 0.25, 0.5, 0.75, 1)),
+            labels=("0%", "25%", "50%", "75%", "100%"),
+            range=(0.05, 1.0),
+        )
+        if use_pass_rate
+        else p9.scale_alpha_manual(
+            values=(
+                {"OK": 0.65, "R-hat warning": 0.20}
+                if run_level
+                else {"OK": 1.0, "R-hat warning": 0.25}
+            )
+        )
+    )
+
+    return (
+        p9.ggplot(estimates, p9.aes(x="Plot N", color="Parameterization"))
+        + p9.geom_hline(
+            data=references,
+            mapping=p9.aes(yintercept="True value"),
+            inherit_aes=False,
+            color="#555555",
+            linetype="dashed",
+        )
+        + p9.geom_linerange(
+            p9.aes(ymin="q05", ymax="q95", alpha=alpha_variable),
+            size=interval_size,
+        )
+        + p9.geom_point(
+            data=points,
+            mapping=p9.aes(
+                y="Estimate",
+                shape="Statistic",
+                alpha=alpha_variable,
+            ),
+            size=point_size,
+        )
+        + p9.facet_wrap("Variable", ncol=1, scales="free_y")
+        + p9.scale_x_log10(
+            breaks=list(n_obs_breaks),
+            labels=[str(value) for value in n_obs_breaks],
+        )
+        + p9.scale_color_manual(values={"Centered": "#0072B2", "Non-centered": "#D55E00"})
+        + p9.scale_shape_manual(values={"Median": "o", "Mean": "x"})
+        + alpha_scale
+        + p9.guides(
+            color=p9.guide_legend(nrow=1),
+            shape=p9.guide_legend(nrow=1),
+            alpha=p9.guide_legend(nrow=1),
+        )
+        + p9.labs(
+            x="Observations per group",
+            y="Posterior estimate",
+            color="Parameterization",
+            shape="Summary",
+            alpha="Diagnostic pass rate" if use_pass_rate else "Sampler diagnostics",
+            title=title,
+            subtitle=subtitle,
+        )
+        + p9.theme_minimal()
+        + p9.theme(
+            figure_size=figure_size,
+            legend_position="bottom",
+            legend_box="vertical",
+            legend_box_just="left",
+            legend_title=p9.element_text(size=9),
+            legend_text=p9.element_text(size=8),
+        )
+    )
+
+
+def summarize_parameter_estimate_runs(
+    estimates: pd.DataFrame,
+    n_obs_by_parameterization: Mapping[str, Sequence[int]],
+    median_r_hat_limit: float = 1.01,
+    maximum_r_hat_limit: float = 1.03,
+) -> pd.DataFrame:
+    """Separate within-run uncertainty from variability across repeated fits."""
+    estimates = parameter_estimate_frame(
+        estimates,
+        n_obs_by_parameterization=n_obs_by_parameterization,
+    )
+    required_columns = {
+        "Run",
+        "q05",
+        "q50",
+        "q95",
+        "Median R_hat",
+        "Maximum R_hat",
+    }
+    missing_columns = required_columns.difference(estimates.columns)
+    if missing_columns:
+        missing = ", ".join(sorted(missing_columns))
+        raise ValueError(f"Run-level estimate data are missing columns: {missing}")
+
+    estimates["diagnostics_ok"] = estimates["Median R_hat"].le(median_r_hat_limit) & estimates[
+        "Maximum R_hat"
+    ].lt(maximum_r_hat_limit)
+    summary = (
+        estimates.groupby(
+            ["Parameterization", "N", "Variable"],
+            sort=False,
+            observed=True,
+        )
+        .agg(
+            runs=("Run", "nunique"),
+            runs_passing_diagnostics=("diagnostics_ok", "sum"),
+            within_q05=("q05", "mean"),
+            within_q95=("q95", "mean"),
+            estimate=("q50", "median"),
+            between_q05=("q50", lambda values: values.quantile(0.05)),
+            between_q95=("q50", lambda values: values.quantile(0.95)),
+        )
+        .reset_index()
+    )
+    summary["diagnostic_pass_rate"] = summary["runs_passing_diagnostics"] / summary["runs"]
+    summary["diagnostic_opacity"] = 0.05 + 0.95 * summary["diagnostic_pass_rate"].pow(2)
+    summary["Variable"] = pd.Categorical(
+        summary["Variable"],
+        categories=list(estimates["Variable"].cat.categories),
+        ordered=True,
+    )
+
+    parameterizations_per_n = summary.groupby("N")["Parameterization"].transform("nunique")
+    shared_n = parameterizations_per_n.gt(1)
+    x_multiplier = pd.Series(1.0, index=summary.index)
+    x_multiplier.loc[shared_n & summary["Parameterization"].eq("Centered")] = 1 / 1.08
+    x_multiplier.loc[shared_n & summary["Parameterization"].eq("Non-centered")] = 1.08
+    summary["plot_n"] = summary["N"] * x_multiplier
+    return summary
+
+
+def plot_parameter_estimate_variability(
+    estimates: pd.DataFrame,
+    n_obs_by_parameterization: Mapping[str, Sequence[int]],
+    true_values: Mapping[str, float],
+    n_obs_breaks: Sequence[int] | None = None,
+    median_r_hat_limit: float = 1.01,
+    maximum_r_hat_limit: float = 1.03,
+    title: str = "Posterior estimates across repeated fits",
+    subtitle: str = (
+        "Thin: mean posterior q05–q95; thick: q05–q95 of run medians\n"
+        "Point: median run estimate; intervals offset for visibility"
+    ),
+    figure_size: tuple[float, float] = (8.0, 6.0),
+) -> p9.ggplot:
+    """Plot within-run uncertainty and between-run estimate variability."""
+    summary = summarize_parameter_estimate_runs(
+        estimates,
+        n_obs_by_parameterization=n_obs_by_parameterization,
+        median_r_hat_limit=median_r_hat_limit,
+        maximum_r_hat_limit=maximum_r_hat_limit,
+    )
+    within_intervals = summary.rename(
+        columns={"within_q05": "lower", "within_q95": "upper"}
+    ).assign(
+        interval="Within-run posterior interval",
+        interval_plot_n=lambda frame: frame["plot_n"] / 1.025,
+    )
+    between_intervals = summary.rename(
+        columns={"between_q05": "lower", "between_q95": "upper"}
+    ).assign(
+        interval="Between-run median spread",
+        interval_plot_n=lambda frame: frame["plot_n"] * 1.025,
+    )
+    intervals = pd.concat(
+        [within_intervals, between_intervals],
+        ignore_index=True,
+    )
+    intervals["interval"] = pd.Categorical(
+        intervals["interval"],
+        categories=[
+            "Within-run posterior interval",
+            "Between-run median spread",
+        ],
+        ordered=True,
+    )
+
+    references = pd.DataFrame(
+        [{"Variable": variable, "True value": value} for variable, value in true_values.items()]
+    )
+    references["Variable"] = pd.Categorical(
+        references["Variable"],
+        categories=list(summary["Variable"].cat.categories),
+        ordered=True,
+    )
+    if n_obs_breaks is None:
+        n_obs_breaks = sorted(summary["N"].unique())
+
+    diagnostic_rates = (0, 0.25, 0.5, 0.75, 1)
+    diagnostic_opacities = tuple(0.05 + 0.95 * value**2 for value in diagnostic_rates)
+
+    return (
+        p9.ggplot(intervals, p9.aes(x="interval_plot_n", color="Parameterization"))
+        + p9.geom_hline(
+            data=references,
+            mapping=p9.aes(yintercept="True value"),
+            inherit_aes=False,
+            color="#555555",
+            linetype="dashed",
+        )
+        + p9.geom_linerange(
+            p9.aes(
+                ymin="lower",
+                ymax="upper",
+                size="interval",
+                alpha="diagnostic_opacity",
+            )
+        )
+        + p9.geom_point(
+            data=summary,
+            mapping=p9.aes(
+                x="plot_n",
+                y="estimate",
+                alpha="diagnostic_opacity",
+            ),
+            size=1.8,
+        )
+        + p9.facet_wrap("Variable", ncol=1, scales="free_y")
+        + p9.scale_x_log10(
+            breaks=list(n_obs_breaks),
+            labels=[str(value) for value in n_obs_breaks],
+        )
+        + p9.scale_color_manual(values={"Centered": "#0072B2", "Non-centered": "#D55E00"})
+        + p9.scale_size_manual(
+            values={
+                "Within-run posterior interval": 0.7,
+                "Between-run median spread": 2.4,
+            }
+        )
+        + p9.scale_alpha_continuous(
+            limits=(0.05, 1),
+            breaks=diagnostic_opacities,
+            labels=("0%", "25%", "50%", "75%", "100%"),
+            range=(0.05, 1.0),
+        )
+        + p9.guides(
+            color=p9.guide_legend(nrow=1),
+            size=p9.guide_legend(nrow=1),
+            alpha=p9.guide_legend(nrow=1),
+        )
+        + p9.labs(
+            x="Observations per group",
+            y="Posterior estimate",
+            color="Parameterization",
+            size="Interval",
+            alpha="Diagnostic pass rate",
+            title=title,
+            subtitle=subtitle,
+        )
+        + p9.theme_minimal()
+        + p9.theme(
+            figure_size=figure_size,
+            legend_position="bottom",
+            legend_box="vertical",
+            legend_box_just="left",
+            legend_title=p9.element_text(size=9),
+            legend_text=p9.element_text(size=8),
+        )
+    )
+
+
 def _facet_label(parameterization: Parameterization) -> str:
     """Return the row label used by the faceted sampler plots."""
     return f"{parameterization.label}: {parameterization.sampled_x}"
