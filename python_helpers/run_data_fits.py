@@ -197,64 +197,9 @@ summary = (
     )
 )
 
-estimate_run_counts = (
-    estimate_runs.groupby(["Parameterization", "N", "Variable"], sort=False)
-    .agg(
-        Runs=("Run", "size"),
-        **{"Runs passing diagnostics": ("Diagnostics OK", "sum")},
-    )
-    .reset_index()
-)
-estimate_summary = (
-    estimate_runs.groupby(["Parameterization", "N", "Variable"], sort=False)
-    .agg(
-        Mean=("Mean", "mean"),
-        q05=("q05", "mean"),
-        q50=("q50", "mean"),
-        q95=("q95", "mean"),
-    )
-    .reset_index()
-)
-estimate_summary = estimate_run_counts.merge(
-    estimate_summary,
-    on=["Parameterization", "N", "Variable"],
-    how="left",
-)
-
-# Match the diagnostics for the coordinates actually sampled by each model to
-# the equivalent inferential quantities shown in the estimate plot.
-estimate_diagnostics = summary[
-    [
-        "Parameterization",
-        "N",
-        "Variable",
-        "Median R_hat",
-        "Maximum R_hat",
-    ]
-].copy()
-estimate_diagnostics.loc[
-    estimate_diagnostics["Parameterization"].eq("Non-centered"),
-    "Variable",
-] = estimate_diagnostics.loc[
-    estimate_diagnostics["Parameterization"].eq("Non-centered"),
-    "Variable",
-].replace(
-    {
-        "log_sigma_sq_std": "log_sigma_sq",
-        "theta_std[1]": "theta[1]",
-    }
-)
-estimate_summary = estimate_summary.merge(
-    estimate_diagnostics,
-    on=["Parameterization", "N", "Variable"],
-    how="left",
-    validate="one_to_one",
-)
 
 results_dir = Path("results")
 results_dir.mkdir(exist_ok=True)
 summary.to_csv(results_dir / "cp_ncp_data_fits.csv", index=False)
 estimate_runs.to_csv(results_dir / "cp_ncp_data_estimate_runs.csv", index=False)
-estimate_summary.to_csv(results_dir / "cp_ncp_data_estimates.csv", index=False)
 print(summary.round(2).to_string(index=False))
-print(estimate_summary.round(3).to_string(index=False))

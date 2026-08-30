@@ -69,7 +69,6 @@ from python_helpers import (
     plot_baseball_player_estimates,
     plot_divergence_grid,
     plot_divergences,
-    plot_parameter_estimate_variability,
     plot_rhat_reliability,
     plot_ess_efficiency,
     plot_sampler_time,

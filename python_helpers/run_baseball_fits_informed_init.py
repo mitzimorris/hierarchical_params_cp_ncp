@@ -14,9 +14,6 @@ RESULTS_FILE = PROJECT_ROOT / "results" / "cp_ncp_baseball_fits_informed_init.cs
 ESTIMATE_RUNS_FILE = (
     PROJECT_ROOT / "results" / "cp_ncp_baseball_estimate_runs_informed_init.csv"
 )
-ESTIMATE_SUMMARY_FILE = (
-    PROJECT_ROOT / "results" / "cp_ncp_baseball_estimates_informed_init.csv"
-)
 
 N_RUNS = 100
 N_CHAINS = 4
@@ -120,33 +117,6 @@ def summarize_runs(fits: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def summarize_estimates(estimates: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate run-level posterior summaries for plotting."""
-    return (
-        estimates.groupby(["Parameterization", "Variable"], sort=False)
-        .agg(
-            runs=("Run", "nunique"),
-            runs_passing_diagnostics=("Diagnostics OK", "sum"),
-            mean=("Mean", "mean"),
-            q05=("q05", "mean"),
-            q50=("q50", "mean"),
-            q95=("q95", "mean"),
-            median_r_hat=("Median R_hat", "median"),
-            maximum_r_hat=("Maximum R_hat", "max"),
-        )
-        .reset_index()
-        .rename(
-            columns={
-                "runs": "Runs",
-                "runs_passing_diagnostics": "Runs passing diagnostics",
-                "mean": "Mean",
-                "median_r_hat": "Median R_hat",
-                "maximum_r_hat": "Maximum R_hat",
-            }
-        )
-    )
-
-
 def main() -> None:
     """Run both parameterizations from data-informed initial values."""
     with DATA_FILE.open() as stream:
@@ -234,16 +204,12 @@ def main() -> None:
 
     summary = summarize_runs(pd.DataFrame(rows))
     estimate_runs = pd.DataFrame(estimate_rows)
-    estimate_summary = summarize_estimates(estimate_runs)
     RESULTS_FILE.parent.mkdir(exist_ok=True)
     summary.to_csv(RESULTS_FILE, index=False)
     estimate_runs.to_csv(ESTIMATE_RUNS_FILE, index=False)
-    estimate_summary.to_csv(ESTIMATE_SUMMARY_FILE, index=False)
     print(summary.round(2).to_string(index=False))
-    print(estimate_summary.round(3).to_string(index=False))
     print(f"Saved results to {RESULTS_FILE}")
     print(f"Saved run-level estimates to {ESTIMATE_RUNS_FILE}")
-    print(f"Saved estimate summary to {ESTIMATE_SUMMARY_FILE}")
 
 
 if __name__ == "__main__":
