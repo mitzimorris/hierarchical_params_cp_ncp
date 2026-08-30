@@ -65,10 +65,16 @@ from python_helpers import (
     baseball_population_parameter_table,
     facet_frame,
     fit_parameterizations,
+    make_baseball_posterior_geometry_plot,
     plot_baseball_player_estimates,
     plot_divergence_grid,
     plot_divergences,
     plot_parameter_estimate_variability,
+    plot_rhat_reliability,
+    plot_ess_efficiency,
+    plot_sampler_time,
+    plot_sampler_tuning,
+    plot_single_fit_estimates,
 )
 
 p9.options.figure_size = (6, 6)
@@ -308,9 +314,8 @@ we run 100 fits, using the same sequence of seeds.^[
 This insures that each run starts from the identical initial point.
 ]
 We use the CmdStan defaults:  4 chains per run, 1000 each warmup and sampling iteration.
-For every fit we record the total number of divergent transitions across all four chains,
-the number of chains that had at least one divergence, and CmdStan's elapsed warmup and
-sampling times.  For `y` and `x[1]` we also record `ESS_bulk/s` and $\hat R$,
+
+For `y` and `x[1]` we record `ESS_bulk/s` and $\hat R$,
 both the median and worst values (lowest `ESS_bulk/s` and highest $\hat R$).
 
 ::: {.column-margin}
@@ -327,28 +332,7 @@ as the $N$ autocorrelated samples.
 :::
 
 ```{python}
-# use saved output from python program:  python_helpers/run_prior_fits.py
 prior_fit_summary = pd.read_csv(os.path.join("results", "cp_ncp_prior_fits.csv"))
-prior_run_summary = prior_fit_summary.drop_duplicates("Parameterization")
-prior_run_summary[
-    [
-        "Parameterization",
-        "Runs",
-        "Runs with a divergence",
-        "Average total divergences",
-        "Average affected chains",
-        "Average warmup seconds",
-        "Average sampling seconds",
-    ]
-].set_index("Parameterization").round(2)
-```
-
-The centered parameterization runs all have post-warmup divergences.
-Further inspection of the individual parameter estimates of `y` and `x[1]` show poor $\hat R$ values for both, indicating a failure to converge;
-the sample is not a representative sample from the target density.
-
-
-```{python}
 summary = prior_fit_summary[
     [
         "Parameterization",
@@ -378,15 +362,37 @@ formats = {
     )
 )
 ```
-
+For the centered parameterization,
+the individual parameter estimates of `y` and `x[1]` show poor $\hat R$ values for both, indicating a failure to converge;
+the sample is not a representative sample from the target density.
 The non-centered parametrization runs show that all chains converge.
 Note that both `y` and `y_std` have identical ESS_bulk; this is because
 the non-centered transform is a deterministic rescaling of `y`.
 
+
+We also record the total number of divergent transitions across all four chains,
+the number of chains that had at least one divergence, and CmdStan's elapsed warmup and
+sampling times.
+The centered parameterization runs all have post-warmup divergences.
+
+```{python}
+# use saved output from python program:  python_helpers/run_prior_fits.py
+prior_run_summary = prior_fit_summary.drop_duplicates("Parameterization")
+prior_run_summary[
+    [
+        "Parameterization",
+        "Runs with a divergence",
+        "Average total divergences",
+        "Average affected chains",
+        "Average warmup seconds",
+        "Average sampling seconds",
+    ]
+].set_index("Parameterization").round(2)
+```
+
 The posterior geometry is 10-dimensional.
 We produce a 2-d scatterplot between the population-level parameter
 and one of the local parameters.
-
 
 The first pair of plots shows the space the sampler actually moves in:
 `x_std[1]` and `y_std` for the non-centered parameterization (left)
@@ -598,74 +604,73 @@ pd.DataFrame(
 ### Fitting both models
 
 To compare both models we need to fit each model to each dataset, a total of 16 fits,
-and we need to do this 100 times with different random seeds in order to properly evaluate
-sampler performance.
-We do this using a Python script which tabulates the summary statistics from each run.
-The following table shows the divergences per run.
+and we need to do this 100 times with different random seeds
+using a Python script which tabulates the diagnostics and summary statistics from each run.
+The sampler provides random initial values for all parameters;
+during warmup, the NUTS-HMC algorithm moves from this starting point towards
+the region of the true posterior density known as the "typial set" (see @Betancourt:2017, also
+this discussion from [Andrew Gelman's blog](https://statmodeling.stat.columbia.edu/2020/08/02/the-typical-set-and-its-relevance-to-bayesian-computation/))
+and updates the HMC tuning parameters accordingly.
+The combination of a challenging posterior geometry and a poorly chosen starting point
+can result in a poor set of tuning parameters for the sampler.
+By running the sampler 100 times with different random seeds we run a total of 400 chains,
+each starting from a different random initialization we gain more insight into the
+model's performance and robustness.
+
+The diagnostics $\widehat R$ and bulk ESS are closely related: once the chains are sampling from the stationary distribution,
+decreasing $\widehat R$ corresponds directly to increasing ESS.
+We therefore begin with $\widehat R$ as a convergence screen.
 
 ```{python}
-data_fit_summary = pd.read_csv(
-    os.path.join("results", "cp_ncp_data_fits.csv")
-)
 data_estimate_runs = pd.read_csv(
     os.path.join("results", "cp_ncp_data_estimate_runs.csv")
 )
-data_run_summary = data_fit_summary.drop_duplicates(["Parameterization", "N"])
-data_run_summary[
-    [
-        "Parameterization",
-        "N",
-        "Runs",
-        "Runs with a divergence",
-        "Average total divergences",
-        "Average affected chains",
-    ]
-].set_index(["Parameterization", "N"]).round(2)
+data_fit_summary = pd.read_csv(
+    os.path.join("results", "cp_ncp_data_fits.csv")
+)
+
+plot_rhat_reliability(
+    data_estimate_runs,
+    maximum_r_hat_limit=1.01,
+    n_obs_breaks=N_OBS,
+)
 ```
 
-We inspect the individual parameter estimates for the population parameter `log_sigma_sq`
-and the local parameters `theta[1]` and `theta_std[1]` (for the non-centered parameterization).
+We compare the population parameter `log_sigma_sq` and the local parameter `theta[1]`,
+which are reported on the same scale by both parameterizations.
+We then use ESS_bulk/s, rather than raw ESS, to compare computational efficiency,
+because dividing by runtime introduces information that is not contained in $\widehat R$.
+Each point in the following plot is one run.
+Runs where any of the parameters have $\widehat R  > 1.01$ are shown at half opacity.
+The connecting lines show the median ESS_bulk/s across all 100 runs.
 
 ```{python}
-columns = [
-    "Parameterization",
-    "N",
-    "Variable",
-    "Median ESS_bulk/s",
-    "Minimum ESS_bulk/s",
-    "Median R_hat",
-    "Maximum R_hat",
-    "Runs with R_hat > 1.01",
-]
-
-summary = data_fit_summary[columns].set_index(
-    ["Parameterization", "N", "Variable"]
-)
-
-numeric_columns = summary.select_dtypes(include="number").columns
-
-formats = {
-    column: "{:,.2f}"
-    if column in {"Median R_hat", "Maximum R_hat"}
-    else "{:,.0f}"
-    for column in numeric_columns
-}
-(
-    summary.style
-    .format(formats, na_rep="—")
-    .set_properties(
-        subset=numeric_columns,
-        **{"text-align": "right"},
-    )
+plot_ess_efficiency(
+    data_estimate_runs,
+    maximum_r_hat_limit=1.01,
+    n_obs_breaks=N_OBS,
 )
 ```
 
-The above table shows that
-the centered parameterization reliably converges for datasets with 256 observations per group or higher
-while the non-centered parameterization shows the opposite behavior.
-What is especially notable is the extremely low `ESS_bulk/s` values for the non-centered parameterization
-when there are large amounts of data.
+These plots show a clear pattern:  in the low data regime, the non-centered parameterization
+can reliably converge and sample efficiently while the centered parameterization struggles;
+the reverse is true in the high data regime.
+For this dataset and model, the crossover occurs in the range of 100-200 observations per group.
+This is a very simple model which is perfectly calibrated to the data and there is no reason to expect
+that this particular size range is valid for other models and data.
 
+Finally, we compare the computational cost directly to see  how the posterior geometry affects the amount of  computation required by the sampler.
+The plot reports the median total fitting time across all 100 runs; absolute times are hardware-dependent,
+so the comparison between parameterizations is more informative than the reported number of seconds.
+In the large data regime, not only does the non-centered parameterization fail to fit the data reliably,
+it does so very slowly.
+
+```{python}
+plot_sampler_time(
+    data_fit_summary,
+    n_obs_breaks=N_OBS,
+)
+```
 
 To understand these patterns we repeat the plots from the previous section
 which show the space the sampler moves in:
@@ -740,7 +745,6 @@ high_data_plot = plot_divergence_grid(
 high_data_plot
 ```
 
-
 ### Sampler behaviors in low and high data regimes
 
 The centered model has a hierarchical prior on the population variance and group-level log odds
@@ -800,46 +804,20 @@ A real pain point of the inverse funnel is that the models fail to fit and do so
 This is a consequence of the inverse funnel geometry; in order to move through
 the highly curved posterior, during warmup the sampler adjusts the step size lower and lower;
 during sampling the sampler moves very very slowly.
-To see this, we inspect the stepsize and number of leapfrog steps that sampler takes
-during each iteration together with the bulk ESS/second.
-
+To see this, we inspect the integrator step size and the average number of leapfrog steps
+that the sampler takes during each iteration.
 
 ```{python}
-columns = [
-    "Parameterization",
-    "N",
-    "Variable",
-    "Stepsize",
-    "Average leapfrog steps",    
-    "Median ESS_bulk/s",
-    "Runs with R_hat > 1.01",
-]
-
-summary = data_fit_summary[columns].set_index(
-    ["Parameterization", "N", "Variable"]
-)
-
-numeric_columns = summary.select_dtypes(include="number").columns
-
-formats = {
-    column: "{:,.2f}"
-    if column in {"Stepsize", "Average leapfrog steps"}
-    else "{:,.0f}"
-    for column in numeric_columns
-}
-(
-    summary.style
-    .format(formats, na_rep="—")
-    .set_properties(
-        subset=numeric_columns,
-        **{"text-align": "right"},
-    )
+plot_sampler_tuning(
+    data_fit_summary,
+    n_obs_breaks=N_OBS,
 )
 ```
 
 ### Parameter estimates in low and high data regimes.
 
-Finally, we examine the estimates of `log_sigma_sq` and `theta[1]`, the parameters of interest from both models.
+What if we ignore the diagnostics and just use the estimates of `log_sigma_sq` and `theta[1]` in the returned sample?
+
 The data-generating program which produced the simulated datasets chooses values for `theta` as follows
 
 ```stan
@@ -853,44 +831,27 @@ The group effects are generated independently from a standard normal distributio
 The data-generating population variance is therefore $\sigma^2=1$, corresponding to `log_sigma_sq = 0`.
 For the fixed random seed used here, the data-generating value of `theta[1]` is $1.05$.
 
-```{python}
-ESTIMATE_N_BY_PARAMETERIZATION = {
-    "centered": N_OBS,
-    "non-centered": N_OBS,
-}
+We examine the samples from the first run of both models on all datasets and compare the estimates side-by-side.
 
-parameter_estimate_plot = plot_parameter_estimate_variability(
-    data_estimate_runs,
-    n_obs_by_parameterization=ESTIMATE_N_BY_PARAMETERIZATION,
+```{python}
+plot_single_fit_estimates(
+    fits,
     true_values={
         "log_sigma_sq": 0.0,
         "theta[1]": float(theta_true[0]),
     },
     n_obs_breaks=N_OBS,
-    median_r_hat_limit=1.01,
-    maximum_r_hat_limit=1.03,
 )
-parameter_estimate_plot
 ```
-
-Each point is the median of the 100 run-specific posterior medians.
-The thin interval is the average run-specific posterior q05--q95 interval and therefore represents
-within-run posterior uncertainty.
-The thick interval spans the q05--q95 range of the 100 run-specific posterior medians and therefore
-shows variation in the estimate across repeated fits.
-The two intervals are offset slightly on the x-axis so that the generally much narrower thick interval remains visible.
-Opacity is determined by the proportion of runs that pass the R-hat criteria.
 
 Both models produce roughly the same estimate for both parameters.
 This is expected; changing from the centered to the non-centered parameterization should produce
 equivalent estimates; we have not changed the model, only the space that the sampler is moving through.
-For practical purposes, however, we want to choose the parameterization which reliably produces good diagnostics,
-i.e., $\hat R < 1.01$ and a high effective sample size for the parameters of interest as well as
-a high ESS_bulk/s.
+However without satisfactory sampler diagnostics, the estimates cannot be trusted if the $\hat R > 1.01$.
 
 Binary data does not provide much information;
 without a large number of observations, the model cannot recover the true data-generating parameter.
-In the large data regime it is especially important to use the centered parameterization,
+If there is a large amount of data for every group, use the centered parameterization
 since this is where the non-centered parameterization becomes computationally expensive.
 
 
@@ -1008,7 +969,6 @@ baseball_run_summary = baseball_fit_summary.drop_duplicates("Parameterization")
 baseball_run_summary[
     [
         "Parameterization",
-        "Runs",
         "Runs with a divergence",
         "Average total divergences",
         "Average affected chains",
@@ -1081,7 +1041,6 @@ baseball_run_2_summary = baseball_fit_2_summary.drop_duplicates("Parameterizatio
 baseball_run_2_summary[
     [
         "Parameterization",
-        "Runs",
         "Runs with a divergence",
         "Average total divergences",
         "Average affected chains",
@@ -1100,9 +1059,7 @@ summary = baseball_fit_2_summary[
         "Parameterization",
         "Variable",
         "Median ESS_bulk/s",
-        "Minimum ESS_bulk/s",
         "Median R_hat",
-        "Maximum R_hat",
         "Runs with R_hat > 1.01",
     ]
 ].set_index(["Parameterization", "Variable"])
@@ -1126,59 +1083,68 @@ formats = {
 ```
 The non-centered parameterization is nevertheless more robust computationally: across repeated fits, it is less sensitive to the sampler’s initial state.
 
-Next we compare the estimates of `alpha`, the player ability for all 18 players,
-ordered by the number of at-bats in the season.
-The thin interval represents average within-run posterior uncertainty,
-the thick interval represents variation in the posterior median across repeated fits.
+To better understand these numbers, we inspect the posterior geometry that the sampler is moving in by plotting the local and population-level parameters
+which are alpha and sigma, for the centered parameterization, and alpha_std and sigma for the non-centered parameterization.
+We choose players with the least, intermediate, and most number of at-bats.
 
+```{python}
+make_baseball_posterior_geometry_plot()
+```
+
+For the centered parameterization, the posterior geometry for the player with the fewest at-bats, Max Alvis, is somewhat funnel-shaped.
+The non-centered parameterization plots seem more regular.
+
+Next we compare the estimates of `alpha`, the player ability for all 18 players, ordered by the number of at-bats in the season.
 ```{python}
 baseball_player_plot = plot_baseball_player_estimates(
     baseball_informed_estimate_runs,
     baseball_players,
-    median_r_hat_limit=1.01,
-    maximum_r_hat_limit=1.03,
+    run=1,
 )
 baseball_player_plot
 ```
 
-We examine the population-level parameters from both parameterizations.
-
+Finally, we examine the population-level parameters from both parameterizations.
 ```{python}
 baseball_population_table = baseball_population_parameter_table(
     baseball_informed_estimate_runs,
-    median_r_hat_limit=1.01,
-    maximum_r_hat_limit=1.03,
+    run=1,
 )
 (
     baseball_population_table.style
     .format(
         {
-            "Median estimate": "{:.3f}",
-            "Diagnostic pass rate": "{:.0%}",
+            "Mean estimate": "{:.2f}",
+            "Median estimate": "{:.2f}",
         }
     )
     .hide(axis="index")
 )
 ```
 
-::: {.column-margin}
 The population-level parameters provide a prediction for the batting average of a new MLB player.
 The player's log-odds ability `alpha` is distributed normally with location `mu`, scale `sigma`.
 Player batting ability is $\operatorname{logit}^{-1}(\mu) * 1000$.
-For `mu` $\approx -0.992$ and `sigma` $\approx 0.11$, this is approximately 271-272,
+For `mu` $\approx -0.99$ and `sigma` $\approx 0.11$, this is approximately 271-272,
 and with a 90% credible interval of 257 to 283.
 Major league baseball aficionados accept this as a reasonable estimate for a 1970's era player.
-:::
 
-
-For these data, both parameterizations produce reliable fits and, when the sampler diagnostics are satisfactory, nearly identical posterior estimates.
-This model is slightly more complex than the previous binomial logit model in that it estimates the both the population mean as well as the
-population sd.
-The dataset consists of 18 local groups, with differing numbers of observation per group, although they are all on roughly the same scale.
-For this dataset, the non-centered parameterization provides the more robust and efficient performance.
+This model is slightly more complex than the previous binomial logit model in that it estimates
+the population mean as well as the population sd.
+Another factor here is that the real-world data was not generated from the binomial logit model;
+the true process is considerably more complex than the model.
+For this model and this dataset the non-centered parameterization always converged.
+Examination of the posterior geometry shows that the centered parametization still gives
+rise to the funnel for the group with the smallest number of observations.
 
 
 ## Hierarchical regression, varying-slope varying-intercept version
+
+Stan's affine transform for scalars makes it easy to write a model which
+directly specifies the hierarchical structure while also allowing the non-centered parameterization.
+This is not available for multivariate regressions of the form `y ~ X * Beta`.
+
+
 
 
 ## Reparametrizing auto-regressive coefficients

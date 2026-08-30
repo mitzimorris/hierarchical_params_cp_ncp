@@ -102,6 +102,7 @@ with disable_logging():
                     fit_summary = fit.summary()
                     warmup_seconds = sum(chain["warmup"] for chain in fit.time)
                     sampling_seconds = sum(chain["sampling"] for chain in fit.time)
+                    total_sampler_seconds = warmup_seconds + sampling_seconds
                     run_r_hat = fit_summary.loc[list(convergence_variables), "R_hat"]
                     median_r_hat = float(run_r_hat.median())
                     maximum_r_hat = float(run_r_hat.max())
@@ -122,6 +123,7 @@ with disable_logging():
                                 "Mean leapfrog steps": float(n_leapfrog.mean()),
                                 "Warmup seconds": warmup_seconds,
                                 "Sampling seconds": sampling_seconds,
+                                "Total sampler seconds": total_sampler_seconds,
                                 "ESS_bulk/s": fit_summary.loc[variable, "ESS_bulk/s"],
                                 "R_hat": fit_summary.loc[variable, "R_hat"],
                             }
@@ -142,6 +144,7 @@ with disable_logging():
                                 "Median R_hat": median_r_hat,
                                 "Maximum R_hat": maximum_r_hat,
                                 "Diagnostics OK": diagnostics_ok,
+                                "ESS_bulk/s": fit_summary.loc[variable, "ESS_bulk/s"],
                                 "Mean": estimates.mean(),
                                 "q05": estimates.quantile(0.05),
                                 "q50": estimates.quantile(0.50),
@@ -166,6 +169,7 @@ summary = (
         average_n_leapfrog=("Mean leapfrog steps", "mean"),
         average_warmup_seconds=("Warmup seconds", "mean"),
         average_sampling_seconds=("Sampling seconds", "mean"),
+        median_total_sampler_seconds=("Total sampler seconds", "median"),
         median_ess_per_second=("ESS_bulk/s", "median"),
         minimum_ess_per_second=("ESS_bulk/s", "min"),
         median_r_hat=("R_hat", "median"),
@@ -183,6 +187,7 @@ summary = (
             "average_n_leapfrog": "Average leapfrog steps",
             "average_warmup_seconds": "Average warmup seconds",
             "average_sampling_seconds": "Average sampling seconds",
+            "median_total_sampler_seconds": "Median total sampler seconds",
             "median_ess_per_second": "Median ESS_bulk/s",
             "minimum_ess_per_second": "Minimum ESS_bulk/s",
             "median_r_hat": "Median R_hat",
